@@ -673,7 +673,21 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
                 "memorysetup-gfx-main-allocator-block-size=2097152\n"
                 "memorysetup-gfx-thread-allocator-block-size=2097152\n"
                 "memorysetup-cache-allocator-block-size=1048576\n"
-                "memorysetup-typetree-allocator-block-size=1048576\n";
+                "memorysetup-typetree-allocator-block-size=1048576\n"
+                // Unity 2020.3 reserved 84 MB of allocator regions at start
+                // (three of 16 MB): temp allocators and the bucket allocator
+                // smaller, as the game ran out of memory loading its menu
+                "memorysetup-temp-allocator-size-main=4194304\n"
+                "memorysetup-temp-allocator-size-job-worker=262144\n"
+                "memorysetup-temp-allocator-size-background-worker=32768\n"
+                "memorysetup-temp-allocator-size-preload-manager=4194304\n"
+                "memorysetup-temp-allocator-size-gfx=262144\n"
+                "memorysetup-temp-allocator-size-audio-worker=65536\n"
+                "memorysetup-temp-allocator-size-cloud-worker=32768\n"
+                "memorysetup-temp-allocator-size-nav-mesh-worker=65536\n"
+                "memorysetup-temp-allocator-size-gi-baking-worker=65536\n"
+                "memorysetup-bucket-allocator-block-size=4194304\n"
+                "memorysetup-bucket-allocator-block-count=1\n";
             char *grown = realloc(data, size + sizeof(extra));
             if (grown) {
                 memcpy(grown + size, extra, sizeof(extra));
@@ -835,7 +849,14 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
                        " -memorysetup-gfx-main-allocator-block-size=2097152"
                        " -memorysetup-gfx-thread-allocator-block-size=2097152"
                        " -memorysetup-cache-allocator-block-size=1048576"
-                       " -memorysetup-typetree-allocator-block-size=1048576");
+                       " -memorysetup-typetree-allocator-block-size=1048576"
+                       " -memorysetup-temp-allocator-size-main=4194304"
+                       " -memorysetup-temp-allocator-size-job-worker=262144"
+                       " -memorysetup-temp-allocator-size-background-worker=32768"
+                       " -memorysetup-temp-allocator-size-preload-manager=4194304"
+                       " -memorysetup-temp-allocator-size-gfx=262144"
+                       " -memorysetup-bucket-allocator-block-size=4194304"
+                       " -memorysetup-bucket-allocator-block-count=1");
             l_info("[JAVA] Intent extra \"unity\": memory setup arguments");
         } else {
             r.l = NULL;

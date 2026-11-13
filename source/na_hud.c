@@ -34,7 +34,7 @@ typedef void *(*method_from_name_t)(void *klass, const char *name, int argc);
 typedef void *(*runtime_invoke_t)(void *method, void *obj, void **params, void **exc);
 
 static runtime_invoke_t invoke;
-static void *m_get_fps, *m_set_fps;
+static void *m_get_fps, *m_set_fps, *m_set_tex_limit, *m_get_tex_limit;
 static int state = 0; // 0 not set up, 1 ready, -1 failed
 
 int na_hud_in_level(void) {
@@ -66,8 +66,14 @@ static int setup(void) {
         m_get_fps = method_from_name(app, "get_targetFrameRate", 0);
         m_set_fps = method_from_name(app, "set_targetFrameRate", 1);
     }
-    l_info("[HUD] Application %p: targetFrameRate %p/%p", app, m_get_fps, m_set_fps);
-    return m_get_fps && m_set_fps ? 1 : -1;
+    void *qs = core ? class_from_name(assembly_image(core), "UnityEngine", "QualitySettings") : NULL;
+    if (qs) {
+        m_set_tex_limit = method_from_name(qs, "set_masterTextureLimit", 1);
+        m_get_tex_limit = method_from_name(qs, "get_masterTextureLimit", 0);
+    }
+    l_info("[HUD] Application %p: targetFrameRate %p/%p; QualitySettings %p: masterTextureLimit %p/%p", app, m_get_fps,
+           m_set_fps, qs, m_get_tex_limit, m_set_tex_limit);
+    return (m_get_fps && m_set_fps) || m_set_tex_limit ? 1 : -1;
 }
 
 static void *call(void *method, void *obj, void **params) {
@@ -78,13 +84,34 @@ static void *call(void *method, void *obj, void **params) {
 
 volatile uint32_t na_hud_us = 0; // time spent here, for the frame log (main.c)
 
+/*
+ * Textures at half size (QualitySettings.masterTextureLimit = 1: Unity
+ * uploads each mipmapped texture from its second level). The game's 655
+ * textures filled the Vita's 85 MB of video memory and then the heap while
+ * the menu loaded; at half size they take a quarter. On the 960x544 screen
+ * the difference is small. Set as early as possible: before the first scene
+ * with the game's textures loads.
+ */
+#define TEXTURE_LIMIT 1
+
 void na_hud_tick(int frame) {
-    if (state < 0 || frame < 30 || frame % 300 != 30) return;
+    if (state < 0 || (frame != 0 && (frame < 30 || frame % 300 != 30))) return;
     uint64_t t_start = sceKernelGetProcessTimeWide();
     if (state == 0) {
         state = setup();
         if (state < 0) return;
     }
+    if (m_set_tex_limit) {
+        void *boxed = m_get_tex_limit ? call(m_get_tex_limit, NULL, NULL) : NULL;
+        int limit = boxed ? *(int *)((char *)boxed + 8) : -1;
+        if (limit != TEXTURE_LIMIT) {
+            int want = TEXTURE_LIMIT;
+            void *a[1] = { &want };
+            call(m_set_tex_limit, NULL, a);
+            l_info("[HUD] QualitySettings.masterTextureLimit %d -> %d", limit, want);
+        }
+    }
+    if (!m_get_fps || !m_set_fps) return;
     void *boxed = call(m_get_fps, NULL, NULL);
     int fps = boxed ? *(int *)((char *)boxed + 8) : 0;
     static int last_fps = -12345;
