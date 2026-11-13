@@ -168,6 +168,10 @@ void na_unity_inject_event(jobject ev) {
     if (inject) inject(env, player, ev);
 }
 
+jobject na_unity_activity(void) {
+    return activity;
+}
+
 jobject na_unity_player(void) {
     return player;
 }

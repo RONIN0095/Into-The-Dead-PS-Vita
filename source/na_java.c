@@ -19,6 +19,7 @@
  */
 
 #include "jni_objects.h"
+#include "na_unity.h"
 #include "na_looper.h"
 
 #include <ctype.h>
@@ -267,6 +268,10 @@ static jvalue prefs_call(const char *name, const jvalue *args, int argc) {
 jvalue jo_java_static_field(const char *cls, const char *name, const char *sig) {
     jvalue r;
     r.j = 0;
+    if (is(cls, "com/unity3d/player/UnityPlayer") && is(name, "currentActivity")) {
+        r.l = na_unity_activity(); // the plugins' way to the Activity and its Context
+        if (r.l) return r;
+    }
     if (is(cls, "android/os/Build$VERSION")) {
         if (is(name, "SDK_INT")) r.i = 28;
         else if (is(name, "RELEASE")) r.l = jstr("9");
@@ -441,6 +446,47 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
     // Looper/Handler/Message/Choreographer/proxies (na_looper.c)
     if (na_looper_java_call(cls, name, sig, self, args, argc, &r))
         return r;
+
+    /*
+     * ReflectionHelper: Unity 2020.3 finds fields and methods by name through
+     * Java reflection (AndroidJavaObject.Get/GetStatic/Call), then turns the
+     * Field/Method into an ID with FromReflectedField/FromReflectedMethod.
+     * Answered with the port's own IDs; without them every plugin call from
+     * C# (UnityPlayer.currentActivity first) came back null.
+     */
+    if (is(cls, "com/unity3d/player/ReflectionHelper") &&
+        (is(name, "getFieldID") || is(name, "getMethodID") || is(name, "getConstructorID")) && argc >= 2) {
+        jclass c = (jclass)args[0].l;
+        char *fname = is(name, "getConstructorID") ? strdup("<init>") : jo_jstring_to_utf8((jstring)args[1].l);
+        int sig_arg = is(name, "getConstructorID") ? 1 : 2;
+        char *fsig = argc > sig_arg ? jo_jstring_to_utf8((jstring)args[sig_arg].l) : NULL;
+        if (is(name, "getFieldID")) {
+            jobject f = jo_new_object("java/lang/reflect/Field");
+            jo_set_long(f, "__fid", (jlong)(uintptr_t)(*env())->GetFieldID(env(), c, fname ? fname : "", fsig ? fsig : ""));
+            jo_set_string(f, "__sig", fsig ? fsig : "");
+            jo_set_string(f, "__name", fname ? fname : "");
+            r.l = f;
+        } else {
+            jobject m = jo_new_object("java/lang/reflect/Method");
+            jo_set_long(m, "__mid", (jlong)(uintptr_t)(*env())->GetMethodID(env(), c, fname ? fname : "", fsig ? fsig : "()V"));
+            jo_set_string(m, "__sig", fsig ? fsig : "");
+            jo_set_string(m, "__name", fname ? fname : "");
+            jo_set_obj(m, "__class", (jobject)c);
+            r.l = m;
+        }
+        static int logged = 0;
+        if (logged++ < 60) l_info("[JAVA] ReflectionHelper.%s(%s, %s, %s)", name, c ? ((const char *)c) : "?", fname ? fname : "",
+                                  fsig ? fsig : "");
+        free(fname);
+        free(fsig);
+        return r;
+    }
+    if (is(cls, "com/unity3d/player/ReflectionHelper") && is(name, "getFieldSignature") && argc >= 1) {
+        char *s = jo_is_object(args[0].l) ? jo_get_string(args[0].l, "__sig") : NULL;
+        r.l = jstr(s ? s : "");
+        free(s);
+        return r;
+    }
 
     // Input events (na_input.c)
     if (self && jo_is_object(self) && na_input_event_call(name, sig, self, args, argc, &r))

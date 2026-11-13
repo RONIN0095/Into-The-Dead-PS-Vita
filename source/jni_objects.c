@@ -453,6 +453,12 @@ static jmethodID DJ_FromReflectedMethod(JNIEnv *env, jobject method) {
     return NULL;
 }
 
+// java.lang.reflect.Field objects (ReflectionHelper.getFieldID, na_java.c) carry their jfieldID
+static jfieldID DJ_FromReflectedField(JNIEnv *env, jobject field) {
+    if (jo_is_object(field)) return (jfieldID)(uintptr_t)jo_get_long(field, "__fid");
+    return NULL;
+}
+
 static jobject DJ_ToReflectedMethod(JNIEnv *env, jclass cls, jmethodID mid, jboolean is_static) {
     DJMethod *m = (DJMethod *)mid;
     jobject o = jo_new_object("java/lang/reflect/Method");
@@ -841,6 +847,7 @@ void jni_objects_install(void) {
 
     t->GetMethodID = DJ_GetMethodID;
     t->FromReflectedMethod = DJ_FromReflectedMethod;
+    t->FromReflectedField = DJ_FromReflectedField;
     t->ToReflectedMethod = DJ_ToReflectedMethod;
     t->GetFieldID = DJ_GetFieldID;
 
