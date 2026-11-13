@@ -54,7 +54,9 @@ void na_gl_log_memory(void); // na_gles3.c
 // plus a 41 MB temporary buffer while libil2cpp.so is read, plus stacks and
 // vitaGL. 300 MB left too little for loading; with 192 MB the log showed
 // 100 MB still free after loading, so 248 MB leaves ~44 MB of margin.
-int _newlib_heap_size_user = 248 * 1024 * 1024;
+// 72 MB less than the Ninja Arashi port: Unity 2020.3's allocator regions get
+// their memory outside the heap (reimpl/mem.c)
+int _newlib_heap_size_user = 176 * 1024 * 1024;
 
 #ifdef USE_SCELIBC_IO
 int sceLibcHeapSize = 4 * 1024 * 1024;

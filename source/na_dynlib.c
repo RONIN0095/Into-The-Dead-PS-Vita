@@ -1256,6 +1256,8 @@ static void *ret_null_na(void) {
 static char *environ_empty[] = { NULL };
 static char **environ_na = environ_empty; // the symbol is the variable `char **environ`
 
+int na_mprotect(void *addr, size_t length, int prot); // reimpl/mem.c
+
 so_default_dynlib na_dynlib[] = {
     // stdio
     { "__sF", (uintptr_t)&sF_bionic },
@@ -1412,7 +1414,7 @@ so_default_dynlib na_dynlib[] = {
     // memory
     { "posix_memalign", (uintptr_t)&posix_memalign_na },
     { "madvise", (uintptr_t)&ret0 },
-    { "mprotect", (uintptr_t)&ret0 },
+    { "mprotect", (uintptr_t)&na_mprotect },
 
     // math
     { "cbrtf", (uintptr_t)&cbrtf },

@@ -1142,6 +1142,12 @@ extern int _newlib_heap_size_user; // main.c
 void na_gl_log_memory(void) {
     // newlib heap: what is handed out (uordblks) of the heap grown so far (arena)
     struct mallinfo mi = mallinfo();
+    {
+        void na_mmap_report(size_t *committed, size_t *reserved); // reimpl/mem.c
+        size_t c = 0, r = 0;
+        na_mmap_report(&c, &r);
+        l_info("[MEM] reservations: %u KB with memory of %u KB reserved", (unsigned)(c / 1024), (unsigned)(r / 1024));
+    }
     l_info("[MEM] heap: %u KB used, %u KB free in arena, %u KB never touched; vram %u KB free, vgl ram %u KB, phycont %u KB",
            (unsigned)(mi.uordblks / 1024), (unsigned)(mi.fordblks / 1024),
            (unsigned)((_newlib_heap_size_user - (int)mi.arena) / 1024),
