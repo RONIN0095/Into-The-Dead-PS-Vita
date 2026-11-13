@@ -1,0 +1,50 @@
+diff --git a/source/gxm.c b/source/gxm.c
+index 1c71013..d6cf01e 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -569,6 +569,8 @@ static inline __attribute__((always_inline)) void scene_end(void) {
+ 		sceDisplayWaitVblankStartMulti(vsync_interval);
+ }
+ 
++int vgl_scene_error = 0, vgl_scene_error_w = 0, vgl_scene_error_h = 0; // Vita port: last sceGxmBeginScene failure
++
+ void scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
+ 		dirty_framebuffer = GL_FALSE;
+@@ -621,6 +623,7 @@ void scene_reset(void) {
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on display.\n", __FILE__, __LINE__, get_gxm_error_literal(r));
+ 			}
+ #endif
++			if (r) { vgl_scene_error = r; vgl_scene_error_w = 0; vgl_scene_error_h = 0; }
+ 		} else {
+ 			// Double check that colorsurface and target texture are synced
+ 			if (sceGxmColorSurfaceGetData(&active_write_fb->colorbuffer) != active_write_fb->tex->data) {
+@@ -672,6 +675,7 @@ void scene_reset(void) {
+ 			if (r)
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on framebuffer 0x%08X.\n", __FILE__, __LINE__, get_gxm_error_literal(r), active_write_fb);
+ #endif
++			if (r) { vgl_scene_error = r; vgl_scene_error_w = active_write_fb->width; vgl_scene_error_h = active_write_fb->height; }
+ 		}
+ 
+ 		// Setting back current viewport if enabled cause sceGxm will reset it at sceGxmEndScene call
+diff --git a/source/misc.c b/source/misc.c
+index 1a27d55..cd4f4fb 100644
+--- a/source/misc.c
++++ b/source/misc.c
+@@ -670,11 +670,14 @@ void glClear(GLbitfield mask) {
+ 	sceGxmSetVertexProgram(gxm_context, clear_vertex_program_patched);
+ 	sceGxmSetFragmentProgram(gxm_context, is_fbo_float ? clear_fragment_program_float_patched : clear_fragment_program_patched);
+ 
+-	sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vbuffer);
++	// Vita port: no scene (sceGxmBeginScene failed), don't write through a NULL buffer
++	if (sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vbuffer) < 0 || !vbuffer)
++		return;
+ 	sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &clear_vertices->x);
+ 	sceGxmSetUniformDataF(vbuffer, clear_depth, 0, 1, &clear_depth_value);
+ 
+-	sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fbuffer);
++	if (sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fbuffer) < 0 || !fbuffer)
++		return;
+ 	sceGxmSetUniformDataF(fbuffer, clear_color, 0, 4, &clear_rgba_val.r);
+ 
+ 	// Disable fragment program if not clearing color buffer. Depth and stencil clears are unaffected.

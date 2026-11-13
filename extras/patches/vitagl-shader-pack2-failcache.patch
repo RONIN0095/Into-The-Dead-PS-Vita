@@ -1,0 +1,92 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -147,6 +147,8 @@
+ 	vgl_pack_load();
+ 	uint64_t h = vgl_pack_hash(fname);
+ 	vgl_pack_entry *e = vgl_pack_find(h);
++	if (e && e->size == 4 && memcmp(vgl_pack_data + e->off, "FAIL", 4) == 0)
++		return NULL;
+ 	if (e) {
+ 		void *buf = vglMalloc(e->size);
+ 		vgl_fast_memcpy(buf, vgl_pack_data + e->off, e->size);
+@@ -167,6 +169,26 @@
+ 	return buf;
+ }
+ 
++/*
++ * [port patch] Shaders that fail to compile were compiled again (2-4 s each)
++ * on every level load, because only working shaders were cached. Remember
++ * failures in the pack too ("FAIL" records) and go straight to the fallback.
++ */
++static int vgl_cache_failed(const char *fname) {
++	vgl_pack_load();
++	vgl_pack_entry *e = vgl_pack_find(vgl_pack_hash(fname));
++	return e && e->size == 4 && memcmp(vgl_pack_data + e->off, "FAIL", 4) == 0;
++}
++
++static void vgl_cache_mark_failed(const char *fname) {
++	vgl_pack_load();
++	vgl_pack_add(vgl_pack_hash(fname), "FAIL", 4);
++}
++
++// [port patch] Time spent in glLinkProgram (cache reads, compiles, the rest), in us
++uint32_t vgl_link_time_cache = 0, vgl_link_time_compile = 0, vgl_link_time_total = 0;
++uint32_t vgl_link_compiles = 0, vgl_link_failed_cached = 0;
++
+ static void vgl_cache_write(const char *fname, const void *buf, size_t sz) {
+ 	vgl_pack_load();
+ 	vgl_pack_add(vgl_pack_hash(fname), buf, sz);
+@@ -2282,6 +2304,7 @@
+ 
+ void glLinkProgram(GLuint progr) {
+ 	THREAD_SAFE()
++	uint32_t t_link = sceKernelGetProcessTimeLow();
+ 
+ 	// Grabbing passed program
+ 	program *p = &progs[progr - 1];
+@@ -2324,23 +2347,42 @@
+ 			}
+ 		}
+ #endif
+-		if (!p->vshader->prog || !p->fshader->prog) {
++		uint32_t t_compile = sceKernelGetProcessTimeLow();
++		vgl_link_time_cache += t_compile - t_link;
++#ifdef HAVE_SHADER_CACHE
++		int vfail = !p->vshader->prog && vgl_cache_failed(vert_fname);
++		int ffail = !p->fshader->prog && vgl_cache_failed(frag_fname);
++		vgl_link_failed_cached += vfail + ffail;
++#else
++		int vfail = 0, ffail = 0;
++#endif
++		if ((!p->vshader->prog && !vfail) || (!p->fshader->prog && !ffail)) {
++			vgl_link_compiles++;
+ 			if (p->vshader->is_glsl || p->fshader->is_glsl) {
+ 				glsl_translator_set_process(p->vshader, p->fshader);
+ 			}
+-			if (!p->vshader->prog) {
++			if (!p->vshader->prog && !vfail) {
+ #ifdef HAVE_SHADER_CACHE
+ 				fname = vert_fname;
+ #endif
+ 				vgl_compile_shader(p->vshader, GL_TRUE);
++#ifdef HAVE_SHADER_CACHE
++				if (!p->vshader->prog)
++					vgl_cache_mark_failed(vert_fname);
++#endif
+ 			}
+-			if (!p->fshader->prog) {
++			if (!p->fshader->prog && !ffail) {
+ #ifdef HAVE_SHADER_CACHE
+ 				fname = frag_fname;
+ #endif
+ 				vgl_compile_shader(p->fshader, GL_TRUE);
++#ifdef HAVE_SHADER_CACHE
++				if (!p->fshader->prog)
++					vgl_cache_mark_failed(frag_fname);
++#endif
+ 			}
+ 		}
++		vgl_link_time_compile += sceKernelGetProcessTimeLow() - t_compile;
+ 		fallback_shader(p->vshader);
+ 		fallback_shader(p->fshader);
+ 

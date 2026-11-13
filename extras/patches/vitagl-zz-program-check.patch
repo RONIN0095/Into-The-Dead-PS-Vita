@@ -1,0 +1,25 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+--- a/source/custom_shaders.c	2026-11-05 17:39:53.218634765 +0000
++++ b/source/custom_shaders.c	2026-11-05 17:40:00.909370306 +0000
+@@ -3837,3 +3837,21 @@
+ 	sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id);
+ 	s->unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(s->prog);
+ }
++
++/*
++ * [port patch] Whether a draw with the current program can be set up: the
++ * draw paths dereference the program's shaders without checking them.
++ * Returns 0 if it can't; info gets a short description of the program.
++ */
++int vglCurrentProgramDrawable(char *info, int info_size) {
++	if (cur_program == 0 || cur_program > MAX_CUSTOM_PROGRAMS) {
++		snprintf(info, info_size, "no program (%u)", cur_program);
++		return 0;
++	}
++	program *p = &progs[cur_program - 1];
++	int ok = p->status == PROG_LINKED && p->vshader && p->fshader && p->vshader->prog && p->fshader->prog;
++	if (!ok)
++		snprintf(info, info_size, "program %u: status %d, vshader %p (prog %p), fshader %p (prog %p)", cur_program,
++			p->status, p->vshader, p->vshader ? p->vshader->prog : NULL, p->fshader, p->fshader ? p->fshader->prog : NULL);
++	return ok;
++}

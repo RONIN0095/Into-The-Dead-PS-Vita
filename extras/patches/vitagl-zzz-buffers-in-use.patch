@@ -1,0 +1,84 @@
+diff --git a/source/buffers.c b/source/buffers.c
+index 3c5713c..8b9abc9 100644
+--- a/source/buffers.c
++++ b/source/buffers.c
+@@ -581,7 +581,25 @@ inline void *glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr le
+ 	}
+ #endif
+ 
+-	// FIXME: Current implementation doesn't take into account 'last_frame' state
++	// Drawn from in this frame: the GPU reads it when the frame is sent, so the
++	// writes would change what those draws show (one far vertex, a huge
++	// triangle). The buffer gets new memory with the old contents instead.
++	if (!gpu_buf->mapped && gpu_buf->ptr && gpu_buf->last_frame == vgl_framecount) {
++		uint8_t *ptr = gpu_buf->alloc_func(gpu_buf->size);
++		if (ptr) {
++			if (access & GL_MAP_INVALIDATE_RANGE_BIT) {
++				if (offset > 0)
++					vgl_memcpy(ptr, gpu_buf->ptr, offset);
++				if (gpu_buf->size - offset - length > 0)
++					vgl_memcpy(ptr + offset + length, (uint8_t *)gpu_buf->ptr + offset + length, gpu_buf->size - offset - length);
++			} else {
++				vgl_memcpy(ptr, gpu_buf->ptr, gpu_buf->size);
++			}
++			mark_as_dirty(gpu_buf->ptr);
++			gpu_buf->ptr = ptr;
++			gpu_buf->last_frame = OBJ_NOT_USED;
++		}
++	}
+ 	gpu_buf->mapped = GL_TRUE;
+ 	return (void *)((uint8_t *)gpu_buf->ptr + offset);
+ }
+@@ -614,7 +632,7 @@ inline GLboolean glUnmapNamedBuffer(GLuint buffer) {
+ 	}
+ #endif
+ 
+-	gpu_buf->last_frame = OBJ_NOT_USED;
++	// last_frame stays: the buffer may have been drawn from this frame
+ 	gpu_buf->mapped = GL_FALSE;
+ 	return GL_TRUE;
+ }
+diff --git a/source/draw.c b/source/draw.c
+index e9e6c8c..95e7915 100644
+--- a/source/draw.c
++++ b/source/draw.c
+@@ -352,6 +352,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_in
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
++	if (gpu_buf) gpu_buf->last_frame = vgl_framecount; // the GPU reads the indices at the end of the frame
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+ 	
+ 	// sceGxm doesn't support 8bit indices natively, so we internally convert to 16bit
+@@ -409,6 +410,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLv
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
++	if (gpu_buf) gpu_buf->last_frame = vgl_framecount; // the GPU reads the indices at the end of the frame
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+ 	if (cur_program != 0)
+ 		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, 0, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+@@ -456,6 +458,7 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, G
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
++	if (gpu_buf) gpu_buf->last_frame = vgl_framecount; // the GPU reads the indices at the end of the frame
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+ 	if (cur_program != 0)
+ 		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, end + 1, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+@@ -501,6 +504,7 @@ void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsize
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
++	if (gpu_buf) gpu_buf->last_frame = vgl_framecount; // the GPU reads the indices at the end of the frame
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+ 	if (cur_program != 0)
+ 		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, end + baseVertex + 1, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+@@ -547,6 +551,7 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void
+ 	scene_reset();
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
++	if (gpu_buf) gpu_buf->last_frame = vgl_framecount; // the GPU reads the indices at the end of the frame
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+ 	GLboolean is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, 0, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INSTANCE_16BIT : SCE_GXM_INDEX_SOURCE_INSTANCE_32BIT);
+ 

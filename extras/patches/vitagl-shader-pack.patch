@@ -1,0 +1,210 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -35,6 +35,142 @@
+ #include "utils/xxhash_utils.h"
+ #ifdef HAVE_SHADER_CACHE
+ char vgl_shader_cache_path[256];
++
++/*
++ * [port patch] Shader cache in one pack file instead of one .gxp file per
++ * shader. With a thousand files in one folder every sceIoOpen got slower
++ * (the folder is searched linearly) and linking a program took up to 160 ms.
++ * The pack (<cache path>.pack: records of u64 hash, u32 size, data) is read
++ * into memory once; old .gxp files are moved into it as they're used.
++ */
++typedef struct {
++	uint64_t hash;
++	uint32_t off, size;
++} vgl_pack_entry;
++
++static uint8_t *vgl_pack_data = NULL;
++static uint32_t vgl_pack_len = 0, vgl_pack_cap = 0;
++static vgl_pack_entry *vgl_pack_idx = NULL;
++static uint32_t vgl_pack_n = 0, vgl_pack_idx_cap = 0;
++static int vgl_pack_loaded = 0;
++
++static uint64_t vgl_pack_hash(const char *fname) {
++	const char *s = strrchr(fname, '/');
++	return strtoull(s ? s + 1 : fname, NULL, 16);
++}
++
++static vgl_pack_entry *vgl_pack_find(uint64_t h) {
++	for (uint32_t i = 0; i < vgl_pack_n; i++)
++		if (vgl_pack_idx[i].hash == h)
++			return &vgl_pack_idx[i];
++	return NULL;
++}
++
++static void vgl_pack_index(uint64_t h, uint32_t off, uint32_t size) {
++	if (vgl_pack_n == vgl_pack_idx_cap) {
++		vgl_pack_idx_cap = vgl_pack_idx_cap ? vgl_pack_idx_cap * 2 : 1024;
++		vgl_pack_idx = realloc(vgl_pack_idx, vgl_pack_idx_cap * sizeof(vgl_pack_entry));
++	}
++	vgl_pack_idx[vgl_pack_n].hash = h;
++	vgl_pack_idx[vgl_pack_n].off = off;
++	vgl_pack_idx[vgl_pack_n].size = size;
++	vgl_pack_n++;
++}
++
++static void vgl_pack_load(void) {
++	if (vgl_pack_loaded)
++		return;
++	vgl_pack_loaded = 1;
++	char path[300];
++	sprintf(path, "%s.pack", vgl_shader_cache_path);
++	SceUID f = sceIoOpen(path, SCE_O_RDONLY, 0777);
++	if (f < 0)
++		return;
++	uint32_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
++	sceIoLseek(f, 0, SCE_SEEK_SET);
++	vgl_pack_data = malloc(sz + 1);
++	vgl_pack_cap = sz + 1;
++	if (!vgl_pack_data || sceIoRead(f, vgl_pack_data, sz) != (int)sz) {
++		sceIoClose(f);
++		free(vgl_pack_data);
++		vgl_pack_data = NULL;
++		vgl_pack_cap = 0;
++		return;
++	}
++	sceIoClose(f);
++	uint32_t pos = 0;
++	while (pos + 12 <= sz) {
++		uint64_t h;
++		uint32_t len;
++		memcpy(&h, vgl_pack_data + pos, 8);
++		memcpy(&len, vgl_pack_data + pos + 8, 4);
++		if (pos + 12 + len > sz)
++			break; // truncated record (crash while writing)
++		vgl_pack_index(h, pos + 12, len);
++		pos += 12 + len;
++	}
++	vgl_pack_len = pos;
++}
++
++static void vgl_pack_add(uint64_t h, const void *buf, uint32_t size) {
++	if (vgl_pack_find(h))
++		return;
++	uint8_t hdr[12];
++	memcpy(hdr, &h, 8);
++	memcpy(hdr + 8, &size, 4);
++	char path[300];
++	sprintf(path, "%s.pack", vgl_shader_cache_path);
++	SceUID f = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
++	if (f >= 0) {
++		sceIoWrite(f, hdr, 12);
++		sceIoWrite(f, buf, size);
++		sceIoClose(f);
++	}
++	if (vgl_pack_len + 12 + size > vgl_pack_cap) {
++		uint32_t cap = vgl_pack_cap ? vgl_pack_cap : 1024 * 1024;
++		while (cap < vgl_pack_len + 12 + size)
++			cap *= 2;
++		uint8_t *d = realloc(vgl_pack_data, cap);
++		if (!d)
++			return;
++		vgl_pack_data = d;
++		vgl_pack_cap = cap;
++	}
++	memcpy(vgl_pack_data + vgl_pack_len, hdr, 12);
++	memcpy(vgl_pack_data + vgl_pack_len + 12, buf, size);
++	vgl_pack_index(h, vgl_pack_len + 12, size);
++	vgl_pack_len += 12 + size;
++}
++
++// Returns a vglMalloc'd copy of the cached shader, or NULL
++static void *vgl_cache_read(const char *fname, size_t *sz) {
++	vgl_pack_load();
++	uint64_t h = vgl_pack_hash(fname);
++	vgl_pack_entry *e = vgl_pack_find(h);
++	if (e) {
++		void *buf = vglMalloc(e->size);
++		vgl_fast_memcpy(buf, vgl_pack_data + e->off, e->size);
++		*sz = e->size;
++		return buf;
++	}
++	// Old one-file-per-shader cache: move it into the pack
++	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
++	if (f < 0)
++		return NULL;
++	*sz = sceIoLseek(f, 0, SCE_SEEK_END);
++	sceIoLseek(f, 0, SCE_SEEK_SET);
++	void *buf = vglMalloc(*sz);
++	sceIoRead(f, buf, *sz);
++	sceIoClose(f);
++	vgl_pack_add(h, buf, *sz);
++	sceIoRemove(fname);
++	return buf;
++}
++
++static void vgl_cache_write(const char *fname, const void *buf, size_t sz) {
++	vgl_pack_load();
++	vgl_pack_add(vgl_pack_hash(fname), buf, sz);
++}
+ #endif
+ #ifdef HAVE_TEX_CACHE
+ char vgl_file_cache_path[256];
+@@ -663,11 +799,9 @@
+ #ifdef HAVE_SHADER_CACHE
+ 	// [port patch] A shader that failed to compile has no program to cache.
+ 	if (s->prog && cache_fname) {
+-		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+ 		size_t sz;
+ 		void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+-		sceIoWrite(f, buf, sz);
+-		sceIoClose(f);
++		vgl_cache_write(cache_fname, buf, sz);
+ 		vgl_free(buf);
+ 	}
+ #endif
+@@ -1762,15 +1896,11 @@
+ #ifdef HAVE_SHADER_CACHE
+ 	char fname[256];
+ 	sprintf(fname, "%s/%llX.gxp", vgl_shader_cache_path, XXH3_64bits(s->source, s->size));
+-	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
+-	if (f >= 0) {
++	size_t sz;
++	void *buf = vgl_cache_read(fname, &sz);
++	if (buf) {
+ 		vgl_free(s->source);
+ 		s->source = NULL;
+-		size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-		sceIoLseek(f, 0, SCE_SEEK_SET);
+-		void *buf = vglMalloc(sz);
+-		sceIoRead(f, buf, sz);
+-		sceIoClose(f);
+ 		unserialize_shader(buf, sz, s, GL_FALSE);
+ 		vgl_free(buf);
+ 		return;
+@@ -2177,26 +2307,18 @@
+ 		char *fname;
+ 		if (!p->vshader->prog) {
+ 			sprintf(vert_fname, "%s/%llX.gxp", vgl_shader_cache_path, XXH3_64bits(p->vshader->source, p->vshader->size));
+-			SceUID f = sceIoOpen(vert_fname, SCE_O_RDONLY, 0777);
+-			if (f >= 0) {
+-				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-				sceIoLseek(f, 0, SCE_SEEK_SET);
+-				void *buf = vglMalloc(sz);
+-				sceIoRead(f, buf, sz);
+-				sceIoClose(f);
++			size_t sz;
++			void *buf = vgl_cache_read(vert_fname, &sz);
++			if (buf) {
+ 				unserialize_shader(buf, sz, p->vshader, GL_TRUE);
+ 				vgl_free(buf);
+ 			}
+ 		}
+ 		if (!p->fshader->prog) {
+ 			sprintf(frag_fname, "%s/%llX.gxp", vgl_shader_cache_path, XXH3_64bits(p->fshader->source, p->fshader->size));
+-			SceUID f = sceIoOpen(frag_fname, SCE_O_RDONLY, 0777);
+-			if (f >= 0) {
+-				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
+-				sceIoLseek(f, 0, SCE_SEEK_SET);
+-				void *buf = vglMalloc(sz);
+-				sceIoRead(f, buf, sz);
+-				sceIoClose(f);
++			size_t sz;
++			void *buf = vgl_cache_read(frag_fname, &sz);
++			if (buf) {
+ 				unserialize_shader(buf, sz, p->fshader, GL_TRUE);
+ 				vgl_free(buf);
+ 			}

@@ -1,0 +1,61 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 759dd6e..3b725c9 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -998,12 +998,16 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr + lowest * streams[0].stride;
++			// One stream pointer per attribute. (Packed, the attribute's
++			// offset in the buffer went into SceGxmVertexAttribute.offset,
++			// which has 16 bits: data past 64 KB of a buffer was read from
++			// the wrong place.)
++			is_packed = GL_FALSE;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+ 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
+-				handle_packed_vbo_attrib();
++				handle_unpacked_attrib(lowest, highest);
+ 			}
+ 		} else {
+ 			ptrs[0] = gpu_alloc_mapped_temp((highest - lowest) * streams[0].stride);
+@@ -1225,12 +1229,16 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr + first * streams[0].stride;
++			// One stream pointer per attribute. (Packed, the attribute's
++			// offset in the buffer went into SceGxmVertexAttribute.offset,
++			// which has 16 bits: data past 64 KB of a buffer was read from
++			// the wrong place.)
++			is_packed = GL_FALSE;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+ 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
+-				handle_packed_vbo_attrib();
++				handle_unpacked_attrib(first, count);
+ 			}
+ 		} else {
+ #ifdef SAFER_DRAW_SPEEDHACK
+@@ -1500,12 +1508,16 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
+ 	// Gathering real attribute data pointers
+ 	if (is_packed) {
+ 		if (target_vbo) {
+-			ptrs[0] = (void *)target_vbo->ptr;
++			// One stream pointer per attribute. (Packed, the attribute's
++			// offset in the buffer went into SceGxmVertexAttribute.offset,
++			// which has 16 bits: data past 64 KB of a buffer was read from
++			// the wrong place.)
++			is_packed = GL_FALSE;
+ 			target_vbo->last_frame = vgl_framecount;
+ 			for (int i = 0; i < p->attr_num; i++) {
+ 				uint8_t attr_idx = p->attr_map[i];
+ 				attributes[i].regIndex = p->attr[attr_idx].regIndex;
+-				handle_packed_vbo_attrib();
++				handle_unpacked_attrib(0, top_idx);
+ 			}
+ 		} else {
+ #ifdef SAFER_DRAW_SPEEDHACK

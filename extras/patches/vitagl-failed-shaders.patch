@@ -1,0 +1,79 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index eafb573..b2c6062 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -661,12 +661,15 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
+ #endif
+ 	shark_clear_output();
+ #ifdef HAVE_SHADER_CACHE
+-	SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+-	size_t sz;
+-	void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+-	sceIoWrite(f, buf, sz);
+-	sceIoClose(f);
+-	vgl_free(buf);
++	// [port patch] A shader that failed to compile has no program to cache.
++	if (s->prog && cache_fname) {
++		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
++		size_t sz;
++		void *buf = serialize_shader(NULL, &sz, s, save_bindings);
++		sceIoWrite(f, buf, sz);
++		sceIoClose(f);
++		vgl_free(buf);
++	}
+ #endif
+ }
+ 
+@@ -2110,6 +2113,43 @@ void glGetProgramiv(GLuint progr, GLenum pname, GLint *params) {
+ 	}
+ }
+ 
++/*
++ * [port patch] When a GLSL shader can't be translated or compiled, its program
++ * stays NULL and linking would dereference it. Keep its (translated) source
++ * next to the shader cache for debugging and put an invisible stand-in in its
++ * place, so the game keeps running with that one effect missing.
++ */
++static void fallback_shader(shader *s) {
++	static int failures = 0;
++	if (s->prog)
++		return;
++
++	if (s->source && failures < 64) {
++		char path[256];
++		sprintf(path, "%s/failed_%02d_%s.txt", vgl_shader_cache_path, failures, s->type == GL_FRAGMENT_SHADER ? "frag" : "vert");
++		SceUID f = sceIoOpen(path, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
++		if (f >= 0) {
++			sceIoWrite(f, s->source, strlen(s->source));
++			sceIoClose(f);
++		}
++	}
++	failures++;
++
++	static const char *dummy_vert = "float4 main() : POSITION { return float4(0.0, 0.0, 2.0, 1.0); }";
++	static const char *dummy_frag = "float4 main() : COLOR { return float4(0.0, 0.0, 0.0, 0.0); }";
++	const char *src = s->type == GL_FRAGMENT_SHADER ? dummy_frag : dummy_vert;
++	if (s->source)
++		vgl_free(s->source);
++	s->size = strlen(src);
++	s->source = (char *)vglMalloc(s->size + 1);
++	vgl_fast_memcpy(s->source, src, s->size + 1);
++#ifdef HAVE_SHADER_CACHE
++	compile_shader(s, GL_FALSE, NULL);
++#else
++	compile_shader(s, GL_FALSE);
++#endif
++}
++
+ void glLinkProgram(GLuint progr) {
+ 	THREAD_SAFE()
+ 
+@@ -2179,6 +2219,8 @@ void glLinkProgram(GLuint progr) {
+ 				vgl_compile_shader(p->fshader, GL_TRUE);
+ 			}
+ 		}
++		fallback_shader(p->vshader);
++		fallback_shader(p->fshader);
+ 
+ 		// Setting progressive default attribute bindings
+ 		set_default_attrib_binding();
