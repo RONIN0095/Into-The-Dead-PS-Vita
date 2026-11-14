@@ -378,7 +378,10 @@ static int truncate_na(const char *path, long len) {
  */
 static int io_trace_left = 300;
 
+void na_mmap_touch(const void *buf, size_t len); // reimpl/mem.c
+
 static long read_na(int fd, void *buf, size_t n) {
+    na_mmap_touch(buf, n);
     long cr;
     if (na_io_trace_left <= 0 && na_filecache_read(fd, buf, n, &cr)) return cr;
     long pos = na_io_fd_name(fd) ? (long)lseek(fd, 0, SEEK_CUR) : -1;
@@ -1163,6 +1166,7 @@ static int fnmatch_na(const char *p, const char *s, int flags) {
  * capabilities, CPU affinity, named semaphores) fail or do nothing.
  */
 static long pread_na(int fd, void *buf, size_t n, long off) {
+    na_mmap_touch(buf, n);
     long pos = (long)lseek(fd, 0, SEEK_CUR);
     if (pos < 0 || lseek(fd, off, SEEK_SET) < 0) return -1;
     long got = 0;
@@ -1266,6 +1270,11 @@ static void *ret_null_na(void) {
     return NULL;
 }
 
+static size_t fread_na(void *buf, size_t size, size_t n, FILE *f) {
+    na_mmap_touch(buf, size * n);
+    return fread(buf, size, n, f);
+}
+
 static char *environ_empty[] = { NULL };
 static char **environ_na = environ_empty; // the symbol is the variable `char **environ`
 
@@ -1304,6 +1313,7 @@ so_default_dynlib na_dynlib[] = {
 
     // Unity 2020.3 (see above)
     { "pread", (uintptr_t)&pread_na },
+    { "fread", (uintptr_t)&fread_na },
     { "writev", (uintptr_t)&writev_na },
     { "pthread_cond_timedwait_relative_np", (uintptr_t)&pthread_cond_timedwait_relative_np_na },
     { "pthread_rwlock_destroy", (uintptr_t)&rwlock_destroy_na },

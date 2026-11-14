@@ -479,3 +479,26 @@ int na_madvise(void *addr, size_t length, int advice) {
 }
 
 int na_mmap_fault_count(void) { return faults; }
+
+/*
+ * Buffers handed to the kernel. A file read into a reserved page that was
+ * never touched does not fault: the kernel just fails the read (Unity's
+ * first read of the APK into such a buffer failed, and it could not start).
+ * read/pread/fread give such buffers their memory first.
+ */
+void na_mmap_touch(const void *buf, size_t len) {
+    if (!buf || !len || !reserved_bytes) return;
+    uintptr_t a = (uintptr_t)buf, end = a + len;
+    lock();
+    while (a < end) {
+        mapping *m = find_mapping(a);
+        if (!m) {
+            a = (a & ~(uintptr_t)(MAP_PAGE - 1)) + MAP_PAGE;
+            continue;
+        }
+        uintptr_t e = m->base + m->len < end ? m->base + m->len : end;
+        if (m->uid > 0) commit_range(m, a, e, 0, 1);
+        a = e;
+    }
+    unlock();
+}
