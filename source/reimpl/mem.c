@@ -45,6 +45,7 @@ typedef struct {
     SceUID uid;      // > 0: address space reserved with kubridge (see below)
     uint8_t *commit; // one bit per page: has memory
     uint32_t *pool;  // per page: its page in the pool (when it has memory)
+    uint8_t *access; // one bit per page: made accessible (gets memory on first touch)
 } mapping;
 
 /*
@@ -136,7 +137,7 @@ static int pool_take(size_t want, size_t *first, size_t *got) {
 static int page_bit(const uint8_t *bits, size_t p) { return (bits[p / 8] >> (p % 8)) & 1; }
 
 // Gives the pages of [start, end) memory (zeroed when `zero`, or when new)
-static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero) {
+static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, int only_access) {
     if (start < m->base) start = m->base;
     if (end > m->base + m->len) end = m->base + m->len;
     start &= ~(uintptr_t)(MAP_PAGE - 1);
@@ -144,9 +145,11 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero) {
     int ok = 1;
     for (uintptr_t a = start; a < end;) {
         size_t p = (a - m->base) / MAP_PAGE;
-        int have = page_bit(m->commit, p);
+        int have = page_bit(m->commit, p) || (only_access && !page_bit(m->access, p));
+#define SKIP_PAGE(q) (page_bit(m->commit, ((q) - m->base) / MAP_PAGE) || (only_access && !page_bit(m->access, ((q) - m->base) / MAP_PAGE)))
         uintptr_t b = a + MAP_PAGE;
-        while (b < end && page_bit(m->commit, (b - m->base) / MAP_PAGE) == have) b += MAP_PAGE;
+        while (b < end && SKIP_PAGE(b) == have) b += MAP_PAGE;
+#undef SKIP_PAGE
         if (!have) {
             for (uintptr_t c = a; c < b && ok;) {
                 size_t first = 0, got = 0;
@@ -182,7 +185,7 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero) {
                 memset((void *)c, 0, got * MAP_PAGE);
                 c += got * MAP_PAGE;
             }
-        } else if (zero) {
+        } else if (zero && !only_access) {
             memset((void *)a, 0, b - a);
         }
         a = b;
@@ -211,6 +214,45 @@ static void decommit_range(mapping *m, uintptr_t start, uintptr_t end) {
         }
         a = b;
     }
+}
+
+static void set_access(mapping *m, uintptr_t start, uintptr_t end, int on) {
+    if (start < m->base) start = m->base;
+    if (end > m->base + m->len) end = m->base + m->len;
+    for (uintptr_t a = start & ~(uintptr_t)(MAP_PAGE - 1); a < end; a += MAP_PAGE) {
+        size_t i = (a - m->base) / MAP_PAGE;
+        if (on) m->access[i / 8] |= 1 << (i % 8);
+        else m->access[i / 8] &= ~(1 << (i % 8));
+    }
+}
+
+/*
+ * Memory on first touch, as Linux does. Unity makes whole reservations
+ * accessible at once (73 MB of 91 MB reserved by its first frame) and then
+ * uses only parts of them; giving every accessible page memory right away
+ * used up the pool before the game started. Accessible pages now get
+ * memory when they are first read or written: the data abort comes here
+ * (na_dynlib.c's abort handler), 64 KB around the address get memory, and
+ * the instruction runs again.
+ */
+#define FAULT_CHUNK (64 * 1024)
+static int faults = 0;
+int na_mmap_fault(uint32_t addr) {
+    lock();
+    mapping *m = find_mapping(addr);
+    int ok = 0;
+    if (m && m->uid > 0) {
+        size_t p = (addr - m->base) / MAP_PAGE;
+        if (page_bit(m->access, p) && !page_bit(m->commit, p)) {
+            uintptr_t start = addr & ~(uintptr_t)(FAULT_CHUNK - 1), end = start + FAULT_CHUNK;
+            ok = commit_range(m, start, end, 1, 1) && page_bit(m->commit, p);
+            faults++;
+        } else if (page_bit(m->commit, p)) {
+            ok = 1; // another thread got there first
+        }
+    }
+    unlock();
+    return ok;
 }
 
 void na_mmap_report(size_t *committed, size_t *reserved) {
@@ -273,8 +315,10 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             ret = addr;
             mark_pages(m, (uintptr_t)addr, (uintptr_t)addr + len, 0);
             if (m->uid > 0) {
-                if (prot == 0 && fd < 0) decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + len);
-                else if (!commit_range(m, (uintptr_t)addr, (uintptr_t)addr + len, fd < 0)) {
+                // a fresh mapping: the old pages go; anonymous ones get memory on first touch
+                decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + len);
+                set_access(m, (uintptr_t)addr, (uintptr_t)addr + len, prot != 0);
+                if (fd >= 0 && !commit_range(m, (uintptr_t)addr, (uintptr_t)addr + len, 1, 0)) {
                     unlock();
                     errno = ENOMEM;
                     return MAP_FAILED;
@@ -295,9 +339,10 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             // address space only
             uint8_t *commit = calloc(1, (len / MAP_PAGE + 7) / 8);
             uint32_t *pidx = calloc(len / MAP_PAGE, sizeof(uint32_t));
+            uint8_t *acc = calloc(1, (len / MAP_PAGE + 7) / 8);
             gone = calloc(1, (len / MAP_PAGE + 7) / 8);
             void *base = NULL;
-            SceUID uid = commit && gone && pidx && pool_init() ? kuKernelMemReserve(&base, len, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) : -1;
+            SceUID uid = commit && gone && pidx && acc && pool_init() ? kuKernelMemReserve(&base, len, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) : -1;
             if (uid > 0 && base) {
                 mappings[slot].base = (uintptr_t)base;
                 mappings[slot].len = len;
@@ -306,7 +351,10 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 mappings[slot].uid = uid;
                 mappings[slot].commit = commit;
                 mappings[slot].pool = pidx;
+                mappings[slot].access = acc;
                 reserved_bytes += len;
+                void na_faults_enable(void); // na_dynlib.c
+                na_faults_enable();
                 unlock();
                 static int logged_r = 0;
                 if (logged_r++ < 48) l_info("mmap: %u KB reserved at %p (no memory yet)", (unsigned)(len / 1024), base);
@@ -316,6 +364,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             if (warned++ < 4) l_warn("mmap: kuKernelMemReserve(%u KB) failed (0x%x): taken from the heap", (unsigned)(len / 1024), uid);
             free(commit);
             free(pidx);
+            free(acc);
             free(gone);
             gone = NULL;
         }
@@ -338,6 +387,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         mappings[slot].uid = 0;
         mappings[slot].commit = NULL;
         mappings[slot].pool = NULL;
+        mappings[slot].access = NULL;
     }
     unlock();
 
@@ -369,7 +419,10 @@ int munmap(void *addr, size_t length) {
         // pages are counted once even if unmapped repeatedly; the memory is
         // freed when every page of the mapping is unmapped
         mark_pages(m, (uintptr_t)addr, (uintptr_t)addr + length, 1);
-        if (m->uid > 0) decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + length);
+        if (m->uid > 0) {
+            decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + length);
+            set_access(m, (uintptr_t)addr, (uintptr_t)addr + length, 0);
+        }
         if (m->n_gone * MAP_PAGE >= m->len) {
             if (m->uid > 0) {
                 decommit_range(m, m->base, m->base + m->len);
@@ -377,6 +430,7 @@ int munmap(void *addr, size_t length) {
                 reserved_bytes -= m->len;
                 free(m->commit);
                 free(m->pool);
+                free(m->access);
             } else {
                 free((void *)m->base);
             }
@@ -390,11 +444,18 @@ int munmap(void *addr, size_t length) {
 
 // mprotect: pages of a reservation get their memory when made accessible
 int na_mprotect(void *addr, size_t length, int prot) {
-    if (!prot || !length) return 0;
+    if (!length) return 0;
+    if (!prot) {
+        lock();
+        mapping *m = find_mapping((uintptr_t)addr);
+        if (m && m->uid > 0) set_access(m, (uintptr_t)addr, (uintptr_t)addr + length, 0);
+        unlock();
+        return 0;
+    }
     int ok = 1;
     lock();
     mapping *m = find_mapping((uintptr_t)addr);
-    if (m && m->uid > 0) ok = commit_range(m, (uintptr_t)addr, (uintptr_t)addr + length, 0);
+    if (m && m->uid > 0) set_access(m, (uintptr_t)addr, (uintptr_t)addr + length, 1);
     unlock();
     if (!ok) {
         errno = ENOMEM;
@@ -402,3 +463,15 @@ int na_mprotect(void *addr, size_t length, int prot) {
     }
     return 0;
 }
+
+// madvise(MADV_DONTNEED = 4): the pages lose their memory and read as zero next time
+int na_madvise(void *addr, size_t length, int advice) {
+    if (advice != 4) return 0;
+    lock();
+    mapping *m = find_mapping((uintptr_t)addr);
+    if (m && m->uid > 0) decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + length);
+    unlock();
+    return 0;
+}
+
+int na_mmap_fault_count(void) { return faults; }

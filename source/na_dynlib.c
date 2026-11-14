@@ -707,7 +707,13 @@ __attribute__((naked, target("arm"))) void na_sigreturn(void) {
     );
 }
 
+int na_mmap_fault(uint32_t addr); // reimpl/mem.c
+static volatile int faults_wanted = 0;
+
 static void abort_handler(KuKernelAbortContext *ctx) {
+    // a reserved page touched for the first time: it gets memory, and the
+    // instruction runs again (reimpl/mem.c)
+    if (faults_wanted && na_mmap_fault(ctx->FAR)) return;
     int sig = BIONIC_SIGSEGV;
     void *h = sig_actions[sig].handler;
     if ((uintptr_t)h <= 1) {
@@ -757,7 +763,7 @@ static void abort_handler(KuKernelAbortContext *ctx) {
 }
 
 static void update_abort_handler(void) {
-    int want = (uintptr_t)sig_actions[BIONIC_SIGSEGV].handler > 1 ||
+    int want = faults_wanted || (uintptr_t)sig_actions[BIONIC_SIGSEGV].handler > 1 ||
                (uintptr_t)sig_actions[BIONIC_SIGBUS].handler > 1;
     if (want && !abort_handler_on) {
         KuKernelAbortHandlerOpt opt;
@@ -774,6 +780,13 @@ static void update_abort_handler(void) {
         kuKernelReleaseAbortHandler();
         abort_handler_on = 0;
     }
+}
+
+// reimpl/mem.c, at the first reservation: faults are needed from now on
+void na_faults_enable(void) {
+    if (faults_wanted) return;
+    faults_wanted = 1;
+    update_abort_handler();
 }
 
 static int sigaction_na(int sig, const sigaction_bionic *act, sigaction_bionic *old) {
@@ -1257,6 +1270,7 @@ static char *environ_empty[] = { NULL };
 static char **environ_na = environ_empty; // the symbol is the variable `char **environ`
 
 int na_mprotect(void *addr, size_t length, int prot); // reimpl/mem.c
+int na_madvise(void *addr, size_t length, int advice); // reimpl/mem.c
 
 so_default_dynlib na_dynlib[] = {
     // stdio
@@ -1413,7 +1427,7 @@ so_default_dynlib na_dynlib[] = {
 
     // memory
     { "posix_memalign", (uintptr_t)&posix_memalign_na },
-    { "madvise", (uintptr_t)&ret0 },
+    { "madvise", (uintptr_t)&na_madvise },
     { "mprotect", (uintptr_t)&na_mprotect },
 
     // math
