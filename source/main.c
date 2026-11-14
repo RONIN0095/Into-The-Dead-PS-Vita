@@ -147,6 +147,8 @@ int main() {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
+    void na_mmap_pool_init(void); // reimpl/mem.c
+    na_mmap_pool_init();
     gl_init();
     l_info("vitaGL initialized.");
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);

@@ -72,10 +72,18 @@ static size_t committed_bytes = 0, reserved_bytes = 0;
  * much memory page by page, but it does as one block.
  */
 #define POOL_TRIES 5
-static const size_t pool_sizes[POOL_TRIES] = { 80u << 20, 64u << 20, 48u << 20, 32u << 20, 24u << 20 };
+static const size_t pool_sizes[POOL_TRIES] = { 72u << 20, 64u << 20, 48u << 20, 32u << 20, 24u << 20 };
 static SceUID pool_uid = -1;
 static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
 static uint8_t *pool_used; // one bit per pool page
+
+static int pool_init(void);
+
+// main.c, before vitaGL starts: vitaGL takes all memory left over for its own
+// pool, so the reservations' pool is taken first
+void na_mmap_pool_init(void) {
+    pool_init();
+}
 
 static int pool_init(void) {
     if (pool_uid >= 0) return 1;
