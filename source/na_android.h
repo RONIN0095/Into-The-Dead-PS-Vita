@@ -67,6 +67,7 @@ void AChoreographer_postFrameCallback64_na(void *c, void (*cb)(int64_t, void *),
     { "ALooper_acquire", (uintptr_t)&ALooper_acquire_na }, \
     { "ALooper_release", (uintptr_t)&ALooper_release_na }, \
     { "ALooper_pollOnce", (uintptr_t)&ALooper_pollOnce_na }, \
+    { "ALooper_pollAll", (uintptr_t)&ALooper_pollOnce_na }, /* Unity 2020.3 polls with pollAll */ \
     { "ALooper_wake", (uintptr_t)&ALooper_wake_na }, \
     { "ALooper_addFd", (uintptr_t)&ALooper_addFd_na }, \
     { "ALooper_removeFd", (uintptr_t)&ALooper_removeFd_na }, \
