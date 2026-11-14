@@ -32,6 +32,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
 
 #include "utils/dialog.h"
 #include "utils/logger.h"
@@ -337,7 +338,60 @@ int na_dladdr(const void *addr, na_Dl_info *info) {
 /*
  * Unwinding support
  */
+/*
+ * Unity and IL2CPP walk the stack (_Unwind_Backtrace, LLVM libunwind) for
+ * every error they log. In Into the Dead's menu one such walk never ended:
+ * the unwinder got the same frame (or the same few frames) back forever and
+ * the main thread spun at full speed, with nothing on screen. A walk that
+ * keeps looking up the same 1-4 addresses in turn is cut off here: no unwind
+ * table for that address ends it (_URC_END_OF_STACK) and the log goes on
+ * with the frames found so far. Recursion repeats addresses too, but not
+ * hundreds of times in a row.
+ */
+#define UNWIND_HIST 8
+#define UNWIND_LOOP_MAX 256
+
+static int unwind_loop_check(uintptr_t pc) {
+    static SceUID owner = -1;
+    static uintptr_t hist[UNWIND_HIST];
+    static int n = 0, streak = 0, period = 0, reported = 0;
+    SceUID me = sceKernelGetThreadId();
+    if (me != owner) { // one walk at a time is enough to catch this
+        owner = me;
+        n = streak = period = 0;
+    }
+    int match = 0;
+    for (int p = 1; p <= 4 && p <= n; p++) {
+        if (hist[(n - p) % UNWIND_HIST] == pc) {
+            match = p;
+            break;
+        }
+    }
+    if (match && (match == period || streak == 0)) {
+        period = match;
+        streak++;
+    } else {
+        streak = 0;
+        period = 0;
+    }
+    hist[n % UNWIND_HIST] = pc;
+    n++;
+    if (streak > UNWIND_LOOP_MAX) {
+        streak = 0;
+        period = 0;
+        n = 0;
+        if (reported++ < 8)
+            l_warn("[unwind] stack walk loops at %p (period %d): cut off", (void *)pc, match);
+        return 1;
+    }
+    return 0;
+}
+
 uintptr_t na_dl_unwind_find_exidx(uintptr_t pc, int *pcount) {
+    if (unwind_loop_check(pc)) {
+        if (pcount) *pcount = 0;
+        return 0;
+    }
     for (int i = 0; i < NA_LIB_COUNT; i++) {
         NaLib *lib = &na_libs[i];
         if (!lib->loaded) continue;
