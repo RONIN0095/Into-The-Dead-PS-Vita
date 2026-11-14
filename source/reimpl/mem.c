@@ -72,11 +72,22 @@ static size_t committed_bytes = 0, reserved_bytes = 0;
  * stopped after 9 MB (0x80024302): the kernel does not give a game that
  * much memory page by page, but it does as one block.
  */
-#define POOL_TRIES 5
-static const size_t pool_sizes[POOL_TRIES] = { 72u << 20, 64u << 20, 48u << 20, 32u << 20, 24u << 20 };
-static SceUID pool_uid = -1;
+/*
+ * The pool is made of blocks of 16 MB, as many as there are (up to
+ * POOL_TARGET), taken before vitaGL starts (vitaGL keeps what is left over
+ * for itself). Unity 2020.3 takes nearly all its memory through these
+ * reservations: with 72 MB of pool and a 176 MB heap, the heap had 36 MB
+ * in use when the pool ran out loading the menu. The heap is 80 MB now
+ * (main.c) and the pool gets the rest.
+ */
+#define POOL_BLOCK (16u << 20)
+#define BLOCK_PAGES (POOL_BLOCK / MAP_PAGE)
+#define MAX_BLOCKS 16
+#define POOL_TARGET (160u << 20)
+static SceUID pool_uids[MAX_BLOCKS];
+static int pool_blocks = 0, pool_state = 0; // 0 not tried, 1 ready, -1 none
 static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
-static uint8_t *pool_used; // one bit per pool page
+static uint8_t pool_used[MAX_BLOCKS * BLOCK_PAGES / 8]; // one bit per pool page
 
 static int pool_init(void);
 
@@ -87,26 +98,20 @@ void na_mmap_pool_init(void) {
 }
 
 static int pool_init(void) {
-    if (pool_uid >= 0) return 1;
-    if (pool_uid == -2) return 0;
-    for (int i = 0; i < POOL_TRIES; i++) {
-        SceUID uid = sceKernelAllocMemBlock("na_mmap_pool", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, pool_sizes[i], NULL);
-        if (uid >= 0) {
-            pool_pages = pool_sizes[i] / MAP_PAGE;
-            pool_used = calloc(1, (pool_pages + 7) / 8);
-            if (!pool_used) {
-                sceKernelFreeMemBlock(uid);
-                break;
-            }
-            pool_uid = uid;
-            pool_free = pool_pages;
-            l_info("mmap: memory pool of %u MB for reservations", (unsigned)(pool_sizes[i] >> 20));
-            return 1;
-        }
+    if (pool_state) return pool_state > 0;
+    while (pool_blocks < MAX_BLOCKS && (size_t)pool_blocks * POOL_BLOCK < POOL_TARGET) {
+        SceUID uid = sceKernelAllocMemBlock("na_mmap_pool", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, POOL_BLOCK, NULL);
+        if (uid < 0) break;
+        pool_uids[pool_blocks++] = uid;
     }
-    l_error("mmap: no memory pool for reservations");
-    pool_uid = -2;
-    return 0;
+    pool_pages = (size_t)pool_blocks * BLOCK_PAGES;
+    pool_free = pool_pages;
+    pool_state = pool_blocks ? 1 : -1;
+    if (pool_blocks)
+        l_info("mmap: memory pool of %u MB for reservations", (unsigned)(pool_blocks * (POOL_BLOCK >> 20)));
+    else
+        l_error("mmap: no memory pool for reservations");
+    return pool_state > 0;
 }
 
 static int pool_bit(size_t i) { return (pool_used[i / 8] >> (i % 8)) & 1; }
@@ -122,8 +127,8 @@ static int pool_take(size_t want, size_t *first, size_t *got) {
     for (size_t k = 0; k < pool_pages; k++) {
         size_t i = (pool_hint + k) % pool_pages;
         if (pool_bit(i)) continue;
-        size_t n = 0;
-        while (n < want && i + n < pool_pages && !pool_bit(i + n)) n++;
+        size_t n = 0, block_end = (i / BLOCK_PAGES + 1) * BLOCK_PAGES; // a run stays in one block
+        while (n < want && i + n < block_end && !pool_bit(i + n)) n++;
         for (size_t j = 0; j < n; j++) pool_set(i + j, 1);
         pool_free -= n;
         pool_hint = i + n;
@@ -159,8 +164,8 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, in
                     memset(&opt, 0, sizeof(opt));
                     opt.size = sizeof(opt);
                     opt.attr = KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE;
-                    opt.baseBlock = pool_uid;
-                    opt.baseOffset = first * MAP_PAGE;
+                    opt.baseBlock = pool_uids[first / BLOCK_PAGES];
+                    opt.baseOffset = (first % BLOCK_PAGES) * MAP_PAGE;
                     r = kuKernelMemCommit((void *)c, got * MAP_PAGE, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE, &opt);
                     if (r < 0) {
                         for (size_t j = 0; j < got; j++) pool_set(first + j, 0);
