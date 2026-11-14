@@ -713,7 +713,105 @@ __attribute__((naked, target("arm"))) void na_sigreturn(void) {
 int na_mmap_fault(uint32_t addr); // reimpl/mem.c
 static volatile int faults_wanted = 0;
 
+/*
+ * Sampling a hung thread. User code can't read another thread's registers,
+ * and a busy thread's stack holds stale return addresses from deeper calls
+ * made earlier. So the watchdog takes execute permission away from
+ * libunity's and libil2cpp's code for a moment: the next instruction the
+ * hung thread runs there aborts (prefetch abort), and the handler below
+ * records its registers and the stack above its sp, gives the permission
+ * back and lets the instruction run again. Other threads that land there
+ * meanwhile just run the instruction again until the permission is back.
+ */
+static volatile int sample_window = 0, sample_state = 0;
+static volatile SceUID sample_tid = -1;
+static uint32_t sample_regs[16];
+static uint32_t sample_stack[1024];
+static int sample_n = 0;
+static uintptr_t sample_stack_hi = 0;
+
+static void sample_protect(int exec) {
+    for (int i = 0; i < 2; i++) {
+        NaLib *lib = &na_libs[i == 0 ? NA_LIB_UNITY : NA_LIB_IL2CPP];
+        if (!lib->loaded) continue;
+        uintptr_t lo = lib->mod.text_base & ~0xfffu;
+        uintptr_t hi = (lib->mod.text_base + lib->mod.text_size + 0xfff) & ~0xfffu;
+        kuKernelMemProtect((void *)lo, hi - lo,
+                           KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE | (exec ? KU_KERNEL_PROT_EXEC : 0));
+    }
+}
+
+static int in_sampled_code(uint32_t pc) {
+    for (int i = 0; i < 2; i++) {
+        NaLib *lib = &na_libs[i == 0 ? NA_LIB_UNITY : NA_LIB_IL2CPP];
+        if (lib->loaded && pc >= lib->mod.text_base && pc < lib->mod.text_base + lib->mod.text_size + 0x1000) return 1;
+    }
+    return 0;
+}
+
+static const char *sample_fmt(uint32_t v, char *buf, size_t n) {
+    if (v >= 0x9A400000u && v < 0x9A400000u + na_libs[NA_LIB_UNITY].mod.text_size) snprintf(buf, n, "U+%x", (unsigned)(v - 0x9A400000u));
+    else if (v >= 0x98100000u && v < 0x98100000u + na_libs[NA_LIB_IL2CPP].mod.text_size) snprintf(buf, n, "I+%x", (unsigned)(v - 0x98100000u));
+    else if (v >= 0x81000000u && v < 0x81200000u) snprintf(buf, n, "L+%x", (unsigned)(v - 0x81000000u));
+    else snprintf(buf, n, "%x", (unsigned)v);
+    return buf;
+}
+
+// Called by the watchdog: `count` samples of thread `tid` (its stack ends at stack_hi)
+void na_sample_thread(SceUID tid, uintptr_t stack_hi, int count) {
+    if (!abort_handler_on) {
+        l_warn("[sample] no abort handler: no samples");
+        return;
+    }
+    char a[24], line[640];
+    for (int k = 0; k < count; k++) {
+        sample_tid = tid;
+        sample_stack_hi = stack_hi;
+        sample_state = 1;
+        sample_window = 1;
+        __sync_synchronize();
+        sample_protect(0);
+        for (int w = 0; w < 30 && sample_state != 2; w++) sceKernelDelayThread(10 * 1000);
+        sample_protect(1);
+        sceKernelDelayThread(5 * 1000);
+        sample_window = 0;
+        if (sample_state != 2) {
+            l_info("[sample %d] the thread ran no Unity/IL2CPP code in 300 ms (loader code or waiting)", k);
+            continue;
+        }
+        int len = snprintf(line, sizeof(line), "[sample %d] pc %s", k, sample_fmt(sample_regs[15], a, sizeof(a)));
+        len += snprintf(line + len, sizeof(line) - len, " lr %s sp %08x r0-r3 %08x %08x %08x %08x | stack:",
+                        sample_fmt(sample_regs[14], a, sizeof(a)), (unsigned)sample_regs[13], (unsigned)sample_regs[0],
+                        (unsigned)sample_regs[1], (unsigned)sample_regs[2], (unsigned)sample_regs[3]);
+        int shown = 0;
+        for (int i = 0; i < sample_n && shown < 40 && len < (int)sizeof(line) - 16; i++) {
+            uint32_t v = sample_stack[i];
+            if (!((v >= 0x9A400000u && v < 0x9B500000u) || (v >= 0x98100000u && v < 0x9A000000u) ||
+                  (v >= 0x81000000u && v < 0x81200000u)))
+                continue;
+            len += snprintf(line + len, sizeof(line) - len, " %s", sample_fmt(v, a, sizeof(a)));
+            shown++;
+        }
+        l_info("%s", line);
+        sceKernelDelayThread(70 * 1000);
+    }
+}
+
 static void abort_handler(KuKernelAbortContext *ctx) {
+    if (sample_window && ctx->abortType == KU_KERNEL_ABORT_TYPE_PREFETCH_ABORT && in_sampled_code(ctx->pc)) {
+        if (sample_state == 1 && sceKernelGetThreadId() == sample_tid) {
+            const uint32_t *regs = &ctx->r0;
+            for (int i = 0; i < 16; i++) sample_regs[i] = regs[i];
+            uintptr_t sp = ctx->sp & ~3u, hi = sample_stack_hi;
+            int n = 0;
+            for (uintptr_t p = sp; p + 4 <= hi && n < 1024; p += 4) sample_stack[n++] = *(volatile uint32_t *)p;
+            sample_n = n;
+            sample_protect(1);
+            __sync_synchronize();
+            sample_state = 2;
+        }
+        return; // runs the instruction again (other threads: until execution is allowed again)
+    }
     // a reserved page touched for the first time: it gets memory, and the
     // instruction runs again (reimpl/mem.c)
     if (faults_wanted && na_mmap_fault(ctx->FAR)) return;

@@ -72,6 +72,7 @@ unsigned int sceUserMainThreadStackSize = 4 * 1024 * 1024;
  */
 extern volatile uint64_t log_last_activity_us;
 static volatile uint64_t last_frame_us = 0;
+static SceUID main_tid = -1;
 
 static int watchdog_thread(SceSize args, void *argp) {
     while (1) {
@@ -106,18 +107,28 @@ static int watchdog_thread(SceSize args, void *argp) {
             l_warn("Watchdog: no progress for 20 s (%u managed exceptions thrown so far), thread report:", na_throw_count);
             na_threads_report();
             log_flush();
+            {
+                void na_sample_thread(SceUID tid, uintptr_t stack_hi, int count);
+                SceKernelThreadInfo ti;
+                memset(&ti, 0, sizeof(ti));
+                ti.size = sizeof(ti);
+                if (main_tid >= 0 && sceKernelGetThreadInfo(main_tid, &ti) >= 0) {
+                    l_warn("Watchdog: 10 samples of the main thread:");
+                    na_sample_thread(main_tid, (uintptr_t)ti.stack + ti.stackSize, 10);
+                }
+            }
+            log_flush();
             log_last_activity_us = saved;
         }
         if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
-            if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
-            else l_fatal("Watchdog: no progress for 45 s, crashing on purpose for a core dump.");
+            // No crash on purpose any more: the Vita's core dump of this
+            // port hung at 0% and the console rebooted. The thread report
+            // and the samples above say where the game hangs; it exits.
+            if (combo_s >= 3) l_fatal("L+R+SELECT: thread report, then exit.");
+            else l_fatal("Watchdog: no progress for 45 s, thread report, then exit.");
             na_threads_report();
             log_flush();
-            na_gl_log_memory();
-            sceKernelDelayThread(200 * 1000);
-            log_flush();
-            kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
-            *(volatile int *)0 = 0;
+            sceKernelExitProcess(0);
         }
     }
     return 0;
@@ -177,6 +188,7 @@ int main() {
 #endif
 
     na_thread_register("main", (void *)main);
+    main_tid = sceKernelGetThreadId();
     na_unity_start();
 
     int frame = 0;
