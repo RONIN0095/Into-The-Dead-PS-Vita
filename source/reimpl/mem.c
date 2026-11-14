@@ -216,6 +216,10 @@ static void decommit_range(mapping *m, uintptr_t start, uintptr_t end) {
     }
 }
 
+static void lock(void);
+static void unlock(void);
+static mapping *find_mapping(uintptr_t a);
+
 static void set_access(mapping *m, uintptr_t start, uintptr_t end, int on) {
     if (start < m->base) start = m->base;
     if (end > m->base + m->len) end = m->base + m->len;
