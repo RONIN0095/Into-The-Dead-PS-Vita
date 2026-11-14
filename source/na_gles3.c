@@ -842,12 +842,21 @@ int na_etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return etc2_t
  * CRC32 of the source pixels ("r" files). Render targets never get such an
  * upload and stay as they are.
  */
-static int rgba_cached_upload(GLenum target, GLsizei w, GLsizei h, GLenum type, const void *data) {
-    if (target != GL_TEXTURE_2D || !data || w < 128 || h < 128 || (w & 3) || (h & 3) || w > 2048 || h > 2048) return 0;
-    size_t px = (size_t)w * h, src_size = px * (type == GL_UNSIGNED_BYTE ? 4 : 2);
+static int dxt_source_bpp(GLenum format, GLenum type) {
+    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) return 4;
+    if (format == GL_RGB && type == GL_UNSIGNED_BYTE) return 3;
+    if (format == GL_RGBA && (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1)) return 2;
+    if (format == GL_RGB && type == GL_UNSIGNED_SHORT_5_6_5) return 2;
+    return 0;
+}
+
+static int rgba_cached_upload(GLenum target, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *data) {
+    int bpp = dxt_source_bpp(format, type);
+    if (!bpp || target != GL_TEXTURE_2D || !data || w < 128 || h < 128 || (w & 3) || (h & 3) || w > 2048 || h > 2048) return 0;
+    size_t px = (size_t)w * h, src_size = px * bpp;
     uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, src_size);
     char zpath[140];
-    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/r%08x_%dx%d_%x.dxt5z", (unsigned)crc, w, h, (unsigned)type);
+    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/r%08x_%dx%d_%x_%x.dxt5z", (unsigned)crc, w, h, (unsigned)format, (unsigned)type);
     uint8_t *dxt = malloc(px);
     if (!dxt) return 0;
     static int hits = 0, stored = 0;
@@ -873,19 +882,29 @@ static int rgba_cached_upload(GLenum target, GLsizei w, GLsizei h, GLenum type, 
     }
     const uint8_t *rgba = data;
     uint8_t *expanded = NULL;
-    if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+    if (bpp != 4) {
         expanded = malloc(px * 4);
         if (!expanded) {
             free(dxt);
             return 0;
         }
         const uint16_t *s16 = data;
-        for (size_t i = 0; i < px; i++) {
+        const uint8_t *s8 = data;
+        uint8_t *o = expanded;
+        for (size_t i = 0; i < px; i++, o += 4) {
+            if (bpp == 3) {
+                o[0] = s8[i * 3]; o[1] = s8[i * 3 + 1]; o[2] = s8[i * 3 + 2]; o[3] = 255;
+                continue;
+            }
             uint16_t v = s16[i];
-            expanded[i * 4 + 0] = ((v >> 12) & 15) * 17;
-            expanded[i * 4 + 1] = ((v >> 8) & 15) * 17;
-            expanded[i * 4 + 2] = ((v >> 4) & 15) * 17;
-            expanded[i * 4 + 3] = (v & 15) * 17;
+            if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+                o[0] = ((v >> 12) & 15) * 17; o[1] = ((v >> 8) & 15) * 17; o[2] = ((v >> 4) & 15) * 17; o[3] = (v & 15) * 17;
+            } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+                o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 6) & 31) * 255 / 31; o[2] = ((v >> 1) & 31) * 255 / 31;
+                o[3] = (v & 1) ? 255 : 0;
+            } else { // 5_6_5
+                o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 5) & 63) * 255 / 63; o[2] = (v & 31) * 255 / 31; o[3] = 255;
+            }
         }
         rgba = expanded;
     }
@@ -1147,6 +1166,23 @@ static void glTexImage2D_na_inner(GLenum target, GLint level, GLint ifmt, GLsize
     note_texture(target, w, h, ifmt);
     if (ifmt == 0x8229 /* R8 */ || (ifmt == GL_RED && format == GL_RED)) ifmt = GL_INTENSITY; // see single_channel_ifmt
     glGetError();
+    const void *px = unpack_ptr(data);
+    if (px && level == 0 && dxt_source_bpp(format, type) && (ifmt == (GLint)format || ifmt == 0x8058 || ifmt == 0x8051 ||
+        ifmt == 0x8056 || ifmt == 0x8057 || ifmt == 0x8D62)) {
+        tex_storage *s = storage_for(bound_texture(target), 1);
+        if (s && (s->w != w || s->h != h)) {
+            s->w = w;
+            s->h = h;
+            s->dxt = 0;
+        }
+        if (s && s->dxt == 0 && rgba_cached_upload(target, w, h, format, type, px)) {
+            s->dxt = 1;
+            check_upload("glTexImage2D as DXT5", 0x83F3, w, h);
+            note_filled(target);
+            return;
+        }
+        if (s && s->dxt == 1) s->dxt = 2; // filled again: dynamic, stays uncompressed
+    }
     glTexImage2D(target, level, ifmt, w, h, border, format, type, unpack_ptr(data));
     check_upload("glTexImage2D", ifmt, w, h);
     if (unpack_ptr(data)) note_filled(target);
@@ -1159,17 +1195,29 @@ static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     na_stats.tex_n++;
 }
 
+static void glDeleteTextures_na(GLsizei n, const GLuint *tex) {
+    // Names get reused: forget the DXT5 state of deleted textures.
+    for (GLsizei i = 0; i < n; i++) {
+        tex_storage *s = tex[i] ? storage_for(tex[i], 0) : NULL;
+        if (s) {
+            s->dxt = 0;
+            s->w = s->h = 0;
+        }
+    }
+    glDeleteTextures(n, tex);
+}
+
 static void glTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
                                GLenum type, const void *data) {
     if (level > 0) return;
     data = unpack_ptr(data);
     if (!data) return;
-    if (x == 0 && y == 0 && format == GL_RGBA && (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT_4_4_4_4)) {
+    if (x == 0 && y == 0 && dxt_source_bpp(format, type)) {
         tex_storage *s = storage_for(bound_texture(target), 0);
         if (s && s->w == w && s->h == h && level == 0) {
             if (s->dxt == 0) {
                 glGetError();
-                if (rgba_cached_upload(target, w, h, type, data)) {
+                if (rgba_cached_upload(target, w, h, format, type, data)) {
                     s->dxt = 1;
                     check_upload("glTexSubImage2D as DXT5", 0x83F3, w, h);
                     note_filled(target);
@@ -1178,7 +1226,7 @@ static void glTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint 
             } else if (s->dxt == 1) {
                 // Filled again: a dynamic texture. Back to uncompressed for good.
                 s->dxt = 2;
-                glTexImage2D(target, 0, GL_RGBA, w, h, 0, GL_RGBA, type, data);
+                glTexImage2D(target, 0, format, w, h, 0, format, type, data);
                 note_filled(target);
                 return;
             }
@@ -2288,7 +2336,7 @@ static const gl_entry gl_table[] = {
     E(glGetActiveUniformBlockiv), E(glGetActiveUniformBlockName), E(glGetUniformIndices),
     E(glGetActiveUniformsiv), E(glGetShaderPrecisionFormat), E(glDetachShader), E(glValidateProgram),
     E(glIsVertexArray), E(glProgramParameteri),
-    E(glTexStorage2D), { "glTexStorage2DEXT", (void *)&glTexStorage2D_na },
+    E(glDeleteTextures), E(glTexStorage2D), { "glTexStorage2DEXT", (void *)&glTexStorage2D_na },
     E(glCompressedTexSubImage2D), E(glGetTexLevelParameteriv), E(glGetTexLevelParameterfv),
     E(glGetTexParameteriv), E(glGetInternalformativ),
     E(glClearColor), E(glClearDepthf), E(glClearStencil),
