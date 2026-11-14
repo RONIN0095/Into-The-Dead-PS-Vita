@@ -616,6 +616,7 @@ typedef struct {
     GLuint tex;
     GLenum ifmt;
     GLsizei levels, w, h;
+    uint8_t dxt; // 1: level 0 went in as DXT5, 2: updated again, kept uncompressed
 } tex_storage;
 
 #define MAX_STORAGE 4096
@@ -695,6 +696,7 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
     if (s) {
         s->ifmt = ifmt;
         s->levels = levels;
+        s->dxt = 0;
         s->w = w;
         s->h = h;
     }
@@ -777,14 +779,15 @@ typedef struct {
     uint8_t *dxt;
     int w, row0, rows; // block rows
     int ok;
+    const uint8_t *rgba; // RGBA8 source instead of ETC2 (rgba_to_dxt5)
 } conv_job;
 
 static void *conv_band(void *arg) {
     conv_job *j = arg;
     size_t bw = (size_t)j->w / 4;
-    uint8_t *rgba = malloc((size_t)j->w * 4 * 4 * j->rows);
+    uint8_t *rgba = j->rgba ? (uint8_t *)j->rgba + (size_t)j->row0 * 4 * j->w * 4 : malloc((size_t)j->w * 4 * 4 * j->rows);
     if (!rgba) return NULL;
-    eac_decode((uint8_t *)j->etc + (size_t)j->row0 * bw * 16, rgba, j->w, j->rows * 4, EAC_ETC2);
+    if (!j->rgba) eac_decode((uint8_t *)j->etc + (size_t)j->row0 * bw * 16, rgba, j->w, j->rows * 4, EAC_ETC2);
     uint8_t block[64], *out = j->dxt + (size_t)j->row0 * bw * 16;
     for (int by = 0; by < j->rows * 4; by += 4)
         for (int bx = 0; bx < j->w; bx += 4) {
@@ -792,18 +795,19 @@ static void *conv_band(void *arg) {
             stb_compress_dxt_block(out, block, 1, 0);
             out += 16;
         }
-    free(rgba);
+    if (!j->rgba) free(rgba);
     j->ok = 1;
     return NULL;
 }
 
-static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) {
+static int to_dxt5(const void *etc, const uint8_t *rgba, uint8_t *dxt, int w, int h) {
     int rows = h / 4, n = rows >= 48 ? 3 : 1;
     conv_job jobs[3];
     pthread_t th[3];
     int started[3] = { 0, 0, 0 };
     for (int i = 0; i < n; i++) {
         jobs[i].etc = etc;
+        jobs[i].rgba = rgba;
         jobs[i].dxt = dxt;
         jobs[i].w = w;
         jobs[i].row0 = rows * i / n;
@@ -826,7 +830,84 @@ static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) {
     return 1;
 }
 
+static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return to_dxt5(etc, NULL, dxt, w, h); }
 int na_etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return etc2_to_dxt5(etc, dxt, w, h); }
+
+/*
+ * Uncompressed textures as DXT5. Into the Dead's UI atlases and many of
+ * its textures are RGBA4444 or RGBA32 (2 and 4 bytes a pixel, about 75 MB):
+ * with them the GPU's memory ran out while the menu loaded, and the game
+ * hung. A full level-0 upload of an RGBA texture of 128x128 or more goes in
+ * as DXT5 instead (1 byte a pixel), kept in the texture cache under the
+ * CRC32 of the source pixels ("r" files). Render targets never get such an
+ * upload and stay as they are.
+ */
+static int rgba_cached_upload(GLenum target, GLsizei w, GLsizei h, GLenum type, const void *data) {
+    if (target != GL_TEXTURE_2D || !data || w < 128 || h < 128 || (w & 3) || (h & 3) || w > 2048 || h > 2048) return 0;
+    size_t px = (size_t)w * h, src_size = px * (type == GL_UNSIGNED_BYTE ? 4 : 2);
+    uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, src_size);
+    char zpath[140];
+    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/r%08x_%dx%d_%x.dxt5z", (unsigned)crc, w, h, (unsigned)type);
+    uint8_t *dxt = malloc(px);
+    if (!dxt) return 0;
+    static int hits = 0, stored = 0;
+    FILE *f = fopen(zpath, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long zn = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        uint8_t *z = zn > 0 ? malloc(zn) : NULL;
+        int ok = 0;
+        if (z && fread(z, 1, zn, f) == (size_t)zn) {
+            uLongf out = px;
+            ok = uncompress(dxt, &out, z, zn) == Z_OK && out == px;
+        }
+        free(z);
+        fclose(f);
+        if (ok) {
+            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)px, dxt);
+            free(dxt);
+            if (hits++ < 8) l_info("[texcache] hit %s", zpath);
+            return 1;
+        }
+    }
+    const uint8_t *rgba = data;
+    uint8_t *expanded = NULL;
+    if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+        expanded = malloc(px * 4);
+        if (!expanded) {
+            free(dxt);
+            return 0;
+        }
+        const uint16_t *s16 = data;
+        for (size_t i = 0; i < px; i++) {
+            uint16_t v = s16[i];
+            expanded[i * 4 + 0] = ((v >> 12) & 15) * 17;
+            expanded[i * 4 + 1] = ((v >> 8) & 15) * 17;
+            expanded[i * 4 + 2] = ((v >> 4) & 15) * 17;
+            expanded[i * 4 + 3] = (v & 15) * 17;
+        }
+        rgba = expanded;
+    }
+    int ok = to_dxt5(NULL, rgba, dxt, w, h);
+    free(expanded);
+    if (!ok) {
+        free(dxt);
+        return 0;
+    }
+    glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)px, dxt);
+    mkdir(DATA_PATH "texcache", 0777);
+    uLongf zn = compressBound(px);
+    uint8_t *z = malloc(zn);
+    if (z && compress2(z, &zn, dxt, px, 1) == Z_OK && (f = fopen(zpath, "wb"))) {
+        fwrite(z, 1, zn, f);
+        fclose(f);
+    }
+    free(z);
+    if (stored++ < 8) l_info("[texcache] stored %s", zpath);
+    free(dxt);
+    return 1;
+}
 
 static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size) {
     if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
@@ -1083,6 +1164,26 @@ static void glTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint 
     if (level > 0) return;
     data = unpack_ptr(data);
     if (!data) return;
+    if (x == 0 && y == 0 && format == GL_RGBA && (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT_4_4_4_4)) {
+        tex_storage *s = storage_for(bound_texture(target), 0);
+        if (s && s->w == w && s->h == h && level == 0) {
+            if (s->dxt == 0) {
+                glGetError();
+                if (rgba_cached_upload(target, w, h, type, data)) {
+                    s->dxt = 1;
+                    check_upload("glTexSubImage2D as DXT5", 0x83F3, w, h);
+                    note_filled(target);
+                    return;
+                }
+            } else if (s->dxt == 1) {
+                // Filled again: a dynamic texture. Back to uncompressed for good.
+                s->dxt = 2;
+                glTexImage2D(target, 0, GL_RGBA, w, h, 0, GL_RGBA, type, data);
+                note_filled(target);
+                return;
+            }
+        }
+    }
     glTexSubImage2D(target, level, x, y, w, h, format, type, data);
     note_filled(target);
 }
