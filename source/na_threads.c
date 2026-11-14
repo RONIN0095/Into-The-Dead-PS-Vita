@@ -165,15 +165,23 @@ void na_threads_report(void) {
                 len += snprintf(line + len, sizeof(line) - len, " %s", fmt_addr(s->chain[k], a, sizeof(a)));
         } else if (s->stack_lo) {
             // not in a futex: code addresses on its stack, outermost first
-            uint32_t found[64];
+            // All of them, over several lines: the innermost frames (where
+            // a busy thread is stuck) are the last ones.
+            static uint32_t found[256];
             int m = 0;
-            for (uintptr_t p = s->stack_hi - 4; p >= s->stack_lo && m < 64; p -= 4) {
+            for (uintptr_t p = s->stack_hi - 4; p >= s->stack_lo && m < 256; p -= 4) {
                 uint32_t v = *(volatile uint32_t *)p;
                 if (is_code(v)) found[m++] = v;
             }
-            len += snprintf(line + len, sizeof(line) - len, " | stack:");
-            for (int k = 0; k < m && len < (int)sizeof(line) - 16; k++)
-                len += snprintf(line + len, sizeof(line) - len, " %s", fmt_addr(found[k], a, sizeof(a)));
+            len += snprintf(line + len, sizeof(line) - len, " | stack (%d):", m);
+            l_info("%s", line);
+            for (int k = 0; k < m; k += 24) {
+                len = snprintf(line, sizeof(line), "[THREADS]   %3d:", k);
+                for (int j = k; j < m && j < k + 24; j++)
+                    len += snprintf(line + len, sizeof(line) - len, " %s", fmt_addr(found[j], a, sizeof(a)));
+                l_info("%s", line);
+            }
+            continue;
         }
         l_info("%s", line);
     }

@@ -95,11 +95,24 @@ static int watchdog_thread(SceSize args, void *argp) {
         int combo = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT)) ==
                     (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT);
         combo_s = combo ? combo_s + 1 : 0;
+        // After 20 s without progress: what every thread is doing, before
+        // anything that takes a lock (the memory report below takes the
+        // malloc and mapping locks, and a hung thread may hold one).
+        static uint64_t reported_for = 0;
+        if (last && now - last > 20ULL * 1000 * 1000 && reported_for != last) {
+            reported_for = last;
+            uint64_t saved = log_last_activity_us;
+            l_warn("Watchdog: no progress for 20 s, thread report:");
+            na_threads_report();
+            log_flush();
+            log_last_activity_us = saved;
+        }
         if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
             if (combo_s >= 3) l_fatal("L+R+SELECT: crashing on purpose for a core dump.");
             else l_fatal("Watchdog: no progress for 45 s, crashing on purpose for a core dump.");
-            na_gl_log_memory();
             na_threads_report();
+            log_flush();
+            na_gl_log_memory();
             sceKernelDelayThread(200 * 1000);
             log_flush();
             kuKernelReleaseAbortHandler(); // a real crash, not one for a SIGSEGV handler
