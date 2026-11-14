@@ -44,6 +44,7 @@ typedef struct {
     size_t n_gone;   // pages unmapped
     SceUID uid;      // > 0: address space reserved with kubridge (see below)
     uint8_t *commit; // one bit per page: has memory
+    uint32_t *pool;  // per page: its page in the pool (when it has memory)
 } mapping;
 
 /*
@@ -63,6 +64,67 @@ typedef struct {
 #define RESERVE_MIN (1024 * 1024)
 static size_t committed_bytes = 0, reserved_bytes = 0;
 
+/*
+ * The memory comes from a pool: one memory block taken at the first
+ * reservation, whose pages are mapped into the reserved ranges
+ * (kuKernelMemCommit with a base block). Committing without a base block
+ * stopped after 9 MB (0x80024302): the kernel does not give a game that
+ * much memory page by page, but it does as one block.
+ */
+#define POOL_TRIES 5
+static const size_t pool_sizes[POOL_TRIES] = { 80u << 20, 64u << 20, 48u << 20, 32u << 20, 24u << 20 };
+static SceUID pool_uid = -1;
+static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
+static uint8_t *pool_used; // one bit per pool page
+
+static int pool_init(void) {
+    if (pool_uid >= 0) return 1;
+    if (pool_uid == -2) return 0;
+    for (int i = 0; i < POOL_TRIES; i++) {
+        SceUID uid = sceKernelAllocMemBlock("na_mmap_pool", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, pool_sizes[i], NULL);
+        if (uid >= 0) {
+            pool_pages = pool_sizes[i] / MAP_PAGE;
+            pool_used = calloc(1, (pool_pages + 7) / 8);
+            if (!pool_used) {
+                sceKernelFreeMemBlock(uid);
+                break;
+            }
+            pool_uid = uid;
+            pool_free = pool_pages;
+            l_info("mmap: memory pool of %u MB for reservations", (unsigned)(pool_sizes[i] >> 20));
+            return 1;
+        }
+    }
+    l_error("mmap: no memory pool for reservations");
+    pool_uid = -2;
+    return 0;
+}
+
+static int pool_bit(size_t i) { return (pool_used[i / 8] >> (i % 8)) & 1; }
+static void pool_set(size_t i, int v) {
+    if (v) pool_used[i / 8] |= 1 << (i % 8);
+    else pool_used[i / 8] &= ~(1 << (i % 8));
+}
+
+// A run of up to `want` free pool pages (the first free one found, as long
+// as it goes): its first page, and *got pages
+static int pool_take(size_t want, size_t *first, size_t *got) {
+    if (!pool_free) return 0;
+    for (size_t k = 0; k < pool_pages; k++) {
+        size_t i = (pool_hint + k) % pool_pages;
+        if (pool_bit(i)) continue;
+        size_t n = 0;
+        while (n < want && i + n < pool_pages && !pool_bit(i + n)) n++;
+        for (size_t j = 0; j < n; j++) pool_set(i + j, 1);
+        pool_free -= n;
+        pool_hint = i + n;
+        *first = i;
+        *got = n;
+        return 1;
+    }
+    return 0;
+}
+
 static int page_bit(const uint8_t *bits, size_t p) { return (bits[p / 8] >> (p % 8)) & 1; }
 
 // Gives the pages of [start, end) memory (zeroed when `zero`, or when new)
@@ -78,21 +140,39 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero) {
         uintptr_t b = a + MAP_PAGE;
         while (b < end && page_bit(m->commit, (b - m->base) / MAP_PAGE) == have) b += MAP_PAGE;
         if (!have) {
-            int r = kuKernelMemCommit((void *)a, b - a, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE, NULL);
-            if (r < 0) {
-                static int warned = 0;
-                if (warned++ < 8)
-                    l_error("mmap: no memory for %u KB at %p (0x%x; %u KB committed of %u KB reserved)",
-                            (unsigned)((b - a) / 1024), (void *)a, r, (unsigned)(committed_bytes / 1024),
-                            (unsigned)(reserved_bytes / 1024));
-                ok = 0;
-            } else {
-                for (uintptr_t q = a; q < b; q += MAP_PAGE) {
-                    size_t i = (q - m->base) / MAP_PAGE;
-                    m->commit[i / 8] |= 1 << (i % 8);
+            for (uintptr_t c = a; c < b && ok;) {
+                size_t first = 0, got = 0;
+                int r = -1;
+                if (pool_init() && pool_take((b - c) / MAP_PAGE, &first, &got)) {
+                    KuKernelMemCommitOpt opt;
+                    memset(&opt, 0, sizeof(opt));
+                    opt.size = sizeof(opt);
+                    opt.attr = KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE;
+                    opt.baseBlock = pool_uid;
+                    opt.baseOffset = first * MAP_PAGE;
+                    r = kuKernelMemCommit((void *)c, got * MAP_PAGE, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE, &opt);
+                    if (r < 0) {
+                        for (size_t j = 0; j < got; j++) pool_set(first + j, 0);
+                        pool_free += got;
+                    }
                 }
-                committed_bytes += b - a;
-                memset((void *)a, 0, b - a);
+                if (r < 0) {
+                    static int warned = 0;
+                    if (warned++ < 8)
+                        l_error("mmap: no memory for %u KB at %p (0x%x; %u KB committed of %u KB reserved, %u KB left in the pool)",
+                                (unsigned)((b - c) / 1024), (void *)c, r, (unsigned)(committed_bytes / 1024),
+                                (unsigned)(reserved_bytes / 1024), (unsigned)(pool_free * MAP_PAGE / 1024));
+                    ok = 0;
+                    break;
+                }
+                for (size_t j = 0; j < got; j++) {
+                    size_t i = (c - m->base) / MAP_PAGE + j;
+                    m->commit[i / 8] |= 1 << (i % 8);
+                    m->pool[i] = (uint32_t)(first + j);
+                }
+                committed_bytes += got * MAP_PAGE;
+                memset((void *)c, 0, got * MAP_PAGE);
+                c += got * MAP_PAGE;
             }
         } else if (zero) {
             memset((void *)a, 0, b - a);
@@ -116,6 +196,8 @@ static void decommit_range(mapping *m, uintptr_t start, uintptr_t end) {
             for (uintptr_t q = a; q < b; q += MAP_PAGE) {
                 size_t i = (q - m->base) / MAP_PAGE;
                 m->commit[i / 8] &= ~(1 << (i % 8));
+                pool_set(m->pool[i], 0);
+                pool_free++;
             }
             committed_bytes -= b - a;
         }
@@ -204,9 +286,10 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         if (slot >= 0 && prot == 0 && fd < 0 && len >= RESERVE_MIN) {
             // address space only
             uint8_t *commit = calloc(1, (len / MAP_PAGE + 7) / 8);
+            uint32_t *pidx = calloc(len / MAP_PAGE, sizeof(uint32_t));
             gone = calloc(1, (len / MAP_PAGE + 7) / 8);
             void *base = NULL;
-            SceUID uid = commit && gone ? kuKernelMemReserve(&base, len, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) : -1;
+            SceUID uid = commit && gone && pidx && pool_init() ? kuKernelMemReserve(&base, len, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) : -1;
             if (uid > 0 && base) {
                 mappings[slot].base = (uintptr_t)base;
                 mappings[slot].len = len;
@@ -214,6 +297,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 mappings[slot].n_gone = 0;
                 mappings[slot].uid = uid;
                 mappings[slot].commit = commit;
+                mappings[slot].pool = pidx;
                 reserved_bytes += len;
                 unlock();
                 static int logged_r = 0;
@@ -223,6 +307,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             static int warned = 0;
             if (warned++ < 4) l_warn("mmap: kuKernelMemReserve(%u KB) failed (0x%x): taken from the heap", (unsigned)(len / 1024), uid);
             free(commit);
+            free(pidx);
             free(gone);
             gone = NULL;
         }
@@ -244,6 +329,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         mappings[slot].n_gone = 0;
         mappings[slot].uid = 0;
         mappings[slot].commit = NULL;
+        mappings[slot].pool = NULL;
     }
     unlock();
 
@@ -282,6 +368,7 @@ int munmap(void *addr, size_t length) {
                 sceKernelFreeMemBlock(m->uid);
                 reserved_bytes -= m->len;
                 free(m->commit);
+                free(m->pool);
             } else {
                 free((void *)m->base);
             }
