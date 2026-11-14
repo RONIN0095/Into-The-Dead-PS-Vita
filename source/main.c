@@ -102,7 +102,8 @@ static int watchdog_thread(SceSize args, void *argp) {
         if (last && now - last > 20ULL * 1000 * 1000 && reported_for != last) {
             reported_for = last;
             uint64_t saved = log_last_activity_us;
-            l_warn("Watchdog: no progress for 20 s, thread report:");
+            extern volatile unsigned na_throw_count;
+            l_warn("Watchdog: no progress for 20 s (%u managed exceptions thrown so far), thread report:", na_throw_count);
             na_threads_report();
             log_flush();
             log_last_activity_us = saved;

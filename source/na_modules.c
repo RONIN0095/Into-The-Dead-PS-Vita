@@ -33,6 +33,8 @@
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
+#include <stdint.h>
 
 #include "utils/dialog.h"
 #include "utils/logger.h"
@@ -53,6 +55,11 @@ NaLib na_libs[NA_LIB_COUNT] = {
     [NA_LIB_UNITY]  = { "libunity.so",  DATA_PATH "lib/libunity.so",  0x9A400000, 1 },
     [NA_LIB_IL2CPP] = { "libil2cpp.so", DATA_PATH "lib/libil2cpp.so", 0x98100000, 1 },
 };
+
+static void hook_got(NaLib *lib, const char *name, void *hook, void **orig);
+void na_cxa_throw_hook(void);
+extern void (*na_orig_cxa_throw)(void *, void *, void (*)(void *));
+
 
 // Path that Android would report for the libraries (dladdr, /proc/self/maps).
 #define ANDROID_LIB_DIR "/data/app/" PACKAGE_NAME "-1/lib/arm/"
@@ -115,10 +122,91 @@ void na_modules_load(void) {
         if (!lib->loaded) continue;
         so_relocate(&lib->mod);
         resolve_imports(&lib->mod);
+        if (i == NA_LIB_IL2CPP) hook_got(lib, "__cxa_throw", (void *)&na_cxa_throw_hook, (void **)&na_orig_cxa_throw);
         so_flush_caches(&lib->mod);
         l_info("%s relocated and linked.", lib->soname);
     }
     l_info("Libraries loaded, %u MB free outside the heap.", free_user_mb());
+}
+
+/*
+ * Managed exceptions, logged. IL2CPP throws them as C++ exceptions
+ * (Il2CppExceptionWrapper) through its own __cxa_throw, which it calls
+ * through its PLT: that GOT slot now goes to na_cxa_throw_hook first. The
+ * hook only logs (class, message, thrower) and jumps on to the original
+ * with the stack untouched, so no loader frame stays on the stack for the
+ * unwinder. A game that throws in a loop shows up as a run of these lines.
+ */
+void (*na_orig_cxa_throw)(void *, void *, void (*)(void *));
+volatile unsigned na_throw_count = 0;
+
+static void utf16_to_ascii(const void *str, char *out, int max) {
+    int n = 0;
+    if (str) {
+        int len = *(const int *)((const char *)str + 8);
+        const uint16_t *c = (const uint16_t *)((const char *)str + 12);
+        for (int i = 0; i < len && n < max - 1; i++) out[n++] = c[i] < 128 && c[i] >= 32 ? (char)c[i] : '?';
+    }
+    out[n] = 0;
+}
+
+void na_throw_log(void *obj, void *tinfo, uintptr_t ret) {
+    unsigned n = ++na_throw_count;
+    static uint64_t last_us = 0;
+    uint64_t now = sceKernelGetProcessTimeWide();
+    int quiet = n > 40 && n % 500 != 0;
+    if (quiet) return;
+    const char *tname = tinfo ? *(const char **)((const char *)tinfo + 4) : NULL;
+    char cls[96] = "?", msg[160] = "";
+    if (tname && strstr(tname, "Il2CppExceptionWrapper") && obj) {
+        void *ex = *(void **)obj;
+        static void *(*get_class)(void *);
+        static const char *(*class_name)(void *), *(*class_ns)(void *);
+        if (!get_class) {
+            get_class = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_object_get_class");
+            class_name = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_class_get_name");
+            class_ns = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_class_get_namespace");
+        }
+        void *k = ex && get_class ? get_class(ex) : NULL;
+        if (k) snprintf(cls, sizeof(cls), "%s.%s", class_ns(k), class_name(k));
+        if (ex) utf16_to_ascii(*(void **)((char *)ex + 12), msg, sizeof(msg));
+    } else if (tname) {
+        snprintf(cls, sizeof(cls), "C++ %s", tname);
+    }
+    char where[24];
+    uintptr_t il = na_libs[NA_LIB_IL2CPP].mod.text_base, un = na_libs[NA_LIB_UNITY].mod.text_base;
+    if (ret >= il && ret < il + na_libs[NA_LIB_IL2CPP].mod.text_size) snprintf(where, sizeof(where), "I+%x", (unsigned)(ret - 0x98100000u));
+    else if (ret >= un && ret < un + na_libs[NA_LIB_UNITY].mod.text_size) snprintf(where, sizeof(where), "U+%x", (unsigned)(ret - 0x9A400000u));
+    else snprintf(where, sizeof(where), "%x", (unsigned)ret);
+    l_warn("[throw #%u, %u ms after the last] %s: %s (from %s)", n, (unsigned)((now - last_us) / 1000), cls, msg, where);
+    last_us = now;
+}
+
+__attribute__((naked)) void na_cxa_throw_hook(void) {
+    __asm__ volatile(
+        "push {r0, r1, r2, lr}\n"
+        "mov r2, lr\n"
+        "bl na_throw_log\n"
+        "pop {r0, r1, r2, lr}\n"
+        "ldr r3, 1f\n"
+        "ldr r3, [r3]\n"
+        "bx r3\n"
+        ".align 2\n"
+        "1: .word na_orig_cxa_throw\n");
+}
+
+static void hook_got(NaLib *lib, const char *name, void *hook, void **orig) {
+    for (uint32_t i = 0; i < lib->mod.num_relplt; i++) {
+        Elf32_Rel *rel = &lib->mod.relplt[i];
+        Elf32_Sym *sym = &lib->mod.dynsym[ELF32_R_SYM(rel->r_info)];
+        if (strcmp(lib->mod.dynstr + sym->st_name, name) != 0) continue;
+        uintptr_t *slot = (uintptr_t *)(lib->mod.load_addr + rel->r_offset);
+        *orig = (void *)*slot;
+        *slot = (uintptr_t)hook;
+        l_info("%s: %s goes through a logging hook (was %p)", lib->soname, name, *orig);
+        return;
+    }
+    l_warn("%s: no PLT slot for %s", lib->soname, name);
 }
 
 void na_module_init(NaLibId id) {
