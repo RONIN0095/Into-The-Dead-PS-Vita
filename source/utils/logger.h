@@ -49,6 +49,7 @@ extern "C" {
 
 // The most recent log lines (oldest first), for on-screen reports
 void log_flush(void);
+void log_sync(void);
 int log_recent_count(void);
 const char *log_recent_line(int i);
 int log_raw_printf(const char *fmt, ...);

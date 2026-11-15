@@ -165,7 +165,4 @@ void na_trace_report(void) {
         uint32_t idx = ring_idx[p];
         l_info("[trace]   %s from %s", idx < (uint32_t)n_fns ? fn_name[idx] : "?", fmt(ring_lr[p], a, sizeof(a)));
     }
-    // a second look: does the main thread still call anything?
-    sceKernelDelayThread(1000 * 1000);
-    l_info("[trace] one second later: %u calls recorded (%u new)", (unsigned)ring_pos, (unsigned)(ring_pos - pos));
 }

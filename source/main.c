@@ -97,28 +97,28 @@ static int watchdog_thread(SceSize args, void *argp) {
         int combo = (pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT)) ==
                     (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT);
         combo_s = combo ? combo_s + 1 : 0;
-        // After 20 s without progress: what every thread is doing, before
-        // anything that takes a lock (the memory report below takes the
-        // malloc and mapping locks, and a hung thread may hold one).
+        // After 10 s without progress: the main thread's last calls into the
+        // loader (na_trace.c), written through to the memory card at once, so
+        // the log keeps them even if the console goes down afterwards. Nothing
+        // else: no stack scans, no locks.
         static uint64_t reported_for = 0;
-        if (last && now - last > 20ULL * 1000 * 1000 && reported_for != last) {
+        if (last && now - last > 10ULL * 1000 * 1000 && reported_for != last) {
             reported_for = last;
             uint64_t saved = log_last_activity_us;
-            extern volatile unsigned na_throw_count;
-            l_warn("Watchdog: no progress for 20 s (%u managed exceptions thrown so far), thread report:", na_throw_count);
-            na_threads_report();
-            log_flush();
+            l_warn("Watchdog: no progress for 10 s");
             na_trace_report();
             log_flush();
+            log_sync();
             log_last_activity_us = saved;
         }
         if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
             // No crash on purpose any more: the Vita's core dump of this
             // port hung at 0% and the console rebooted. The thread report
             // and the trace above say where the game hangs; it exits.
-            if (combo_s >= 3) l_fatal("L+R+SELECT: thread report, then exit.");
-            else l_fatal("Watchdog: no progress for 45 s, thread report, then exit.");
+            if (combo_s >= 3) l_fatal("L+R+SELECT: exit.");
+            else l_fatal("Watchdog: no progress for 45 s, exit.");
             log_flush();
+            log_sync();
             sceKernelExitProcess(0);
         }
     }

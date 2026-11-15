@@ -169,6 +169,11 @@ int log_raw_printf(const char *fmt, ...) {
     return n;
 }
 
+// Writes the file through to the memory card (survives a console crash)
+void log_sync(void) {
+    if (log_fd >= 0) sceIoSyncByFd(log_fd, 0);
+}
+
 // Writes buffered log lines to the file (the watchdog calls it every second)
 void log_flush(void) {
     if (!atomic_load_explicit(&_log_mutex_ready, memory_order_relaxed)) return;
