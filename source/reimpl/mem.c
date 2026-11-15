@@ -46,6 +46,7 @@ typedef struct {
     uint8_t *commit; // one bit per page: has memory
     uint32_t *pool;  // per page: its page in the pool (when it has memory)
     uint8_t *access; // one bit per page: made accessible (gets memory on first touch)
+    int dead;        // reservation unmapped: kept for reuse (see munmap)
 } mapping;
 
 /*
@@ -198,37 +199,19 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, in
     return ok;
 }
 
+/*
+ * Pages a reservation no longer needs keep their memory, zeroed (they read
+ * as zero when used again, as fresh anonymous pages do). Giving it back with
+ * kuKernelMemDecommit hung the calling thread in the kernel (Unity's
+ * madvise, then its munmap, while the menu loaded) and left the console
+ * unstable, so the port never decommits.
+ */
 static void decommit_range(mapping *m, uintptr_t start, uintptr_t end) {
     if (start < m->base) start = m->base;
     if (end > m->base + m->len) end = m->base + m->len;
     start &= ~(uintptr_t)(MAP_PAGE - 1);
-    end = (end + MAP_PAGE - 1) & ~(uintptr_t)(MAP_PAGE - 1);
-    for (uintptr_t a = start; a < end;) {
-        size_t p = (a - m->base) / MAP_PAGE;
-        int have = page_bit(m->commit, p);
-        uintptr_t b = a + MAP_PAGE;
-        // A committed run ends where its pool pages stop being consecutive
-        // (another commit, another pool block): one decommit per piece as it
-        // was committed. A single decommit across pieces never came back:
-        // Unity's madvise(DONTNEED) hung the main thread in the kernel at the
-        // menu, and the console was unstable afterwards.
-        while (b < end) {
-            size_t q = (b - m->base) / MAP_PAGE;
-            if (page_bit(m->commit, q) != have) break;
-            if (have && (m->pool[q] != m->pool[q - 1] + 1 || m->pool[q] / BLOCK_PAGES != m->pool[q - 1] / BLOCK_PAGES)) break;
-            b += MAP_PAGE;
-        }
-        if (have && kuKernelMemDecommit((void *)a, b - a) >= 0) {
-            for (uintptr_t q = a; q < b; q += MAP_PAGE) {
-                size_t i = (q - m->base) / MAP_PAGE;
-                m->commit[i / 8] &= ~(1 << (i % 8));
-                pool_set(m->pool[i], 0);
-                pool_free++;
-            }
-            committed_bytes -= b - a;
-        }
-        a = b;
-    }
+    for (uintptr_t a = start; a < end; a += MAP_PAGE)
+        if (page_bit(m->commit, (a - m->base) / MAP_PAGE)) memset((void *)a, 0, MAP_PAGE);
 }
 
 static void lock(void);
@@ -314,7 +297,7 @@ static void unlock(void) {
 
 static mapping *find_mapping(uintptr_t a) {
     for (int i = 0; i < MAX_MAPPINGS; i++)
-        if (mappings[i].base && a >= mappings[i].base && a < mappings[i].base + mappings[i].len)
+        if (mappings[i].base && !mappings[i].dead && a >= mappings[i].base && a < mappings[i].base + mappings[i].len)
             return &mappings[i];
     return NULL;
 }
@@ -354,6 +337,23 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
         for (int i = 0; i < MAX_MAPPINGS; i++)
             if (!mappings[i].base) { slot = i; break; }
         uint8_t *gone = NULL;
+        if (prot == 0 && fd < 0 && len >= RESERVE_MIN) {
+            // an earlier reservation of this size that was unmapped: its
+            // address space and memory again (pages zeroed, none accessible)
+            for (int i = 0; i < MAX_MAPPINGS; i++) {
+                mapping *d = &mappings[i];
+                if (!d->base || !d->dead || d->len != len) continue;
+                size_t pages = len / MAP_PAGE;
+                memset(d->gone, 0, (pages + 7) / 8);
+                memset(d->access, 0, (pages + 7) / 8);
+                d->n_gone = 0;
+                d->dead = 0;
+                unlock();
+                static int logged_u = 0;
+                if (logged_u++ < 24) l_info("mmap: %u KB reserved at %p (reused)", (unsigned)(len / 1024), (void *)d->base);
+                return (void *)d->base;
+            }
+        }
         if (slot >= 0 && prot == 0 && fd < 0 && len >= RESERVE_MIN) {
             // address space only
             uint8_t *commit = calloc(1, (len / MAP_PAGE + 7) / 8);
@@ -371,6 +371,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 mappings[slot].commit = commit;
                 mappings[slot].pool = pidx;
                 mappings[slot].access = acc;
+                mappings[slot].dead = 0;
                 reserved_bytes += len;
                 void na_faults_enable(void); // na_dynlib.c
                 na_faults_enable();
@@ -444,12 +445,12 @@ int munmap(void *addr, size_t length) {
         }
         if (m->n_gone * MAP_PAGE >= m->len) {
             if (m->uid > 0) {
-                decommit_range(m, m->base, m->base + m->len);
-                sceKernelFreeMemBlock(m->uid);
-                reserved_bytes -= m->len;
-                free(m->commit);
-                free(m->pool);
-                free(m->access);
+                // kept with its memory (zeroed above) for the next
+                // reservation of the same size: freeing a block with
+                // committed pages is what the kernel didn't take
+                m->dead = 1;
+                unlock();
+                return 0;
             } else {
                 free((void *)m->base);
             }
