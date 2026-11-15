@@ -151,7 +151,7 @@ int main() {
             }
         }
     }
-    l_info("Into the Dead loader starting.");
+    l_info("Into the Dead loader starting (build %s).", NA_BUILD_ID);
 
     if (!file_exists(DATA_PATH "base.apk"))
         fatal_error("Missing game file:\n%sbase.apk\n\nCopy the game's APK there (renamed to base.apk).", DATA_PATH);

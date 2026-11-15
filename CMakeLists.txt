@@ -26,6 +26,14 @@ set(DATA_PATH "ux0:data/intothedead/") # Path to data (with trailing /)
 set(PACKAGE_NAME "com.sidheinteractive.sif.DR")
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DGAME_PATH="${DATA_PATH}" -DPACKAGE_NAME="${PACKAGE_NAME}")
 
+# Build number in the log's first line (which build a log came from)
+execute_process(COMMAND git rev-parse --short=7 HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE NA_BUILD_ID OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT NA_BUILD_ID)
+  set(NA_BUILD_ID "unknown")
+endif()
+add_definitions(-DNA_BUILD_ID="${NA_BUILD_ID}")
+
 # Release: the diagnostics of the port's development are left out (log only
 # for warnings and errors, no frame and hitch log, no draw ring, no
 # L+R+DOWN trace, no watchdog). -DNA_RELEASE=OFF builds them in again.
