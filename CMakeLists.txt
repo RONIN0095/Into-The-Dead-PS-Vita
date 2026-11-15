@@ -118,7 +118,7 @@ set(SOURCES
     source/na_hud.c
     source/na_filecache.c
     source/na_modules.c
-    source/na_gotprof.c
+    source/na_trace.c
     source/na_shaders.c
     source/na_sles.c
     source/na_unity.c

@@ -24,6 +24,7 @@
 
 #include "na_modules.h"
 #include "na_aaudio.h"
+#include "na_trace.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,11 +345,21 @@ static void *intercept(const char *symbol) {
     return NULL;
 }
 
+// GL entry points handed to Unity go through the hang tracer (na_trace.c)
+static void *gl_traced(const char *symbol, void *p) {
+#ifndef NA_RELEASE
+    return na_trace_wrap(strdup(symbol), p);
+#else
+    (void)symbol;
+    return p;
+#endif
+}
+
 static void *lookup_global(const char *symbol) {
     void *p = na_dynlib_lookup(symbol);
     if (p) return p;
     p = na_gl_get_proc(symbol);
-    if (p) return p;
+    if (p) return gl_traced(symbol, p);
     p = na_aaudio_lookup(symbol);
     if (p) return p;
     for (int i = 0; i < NA_LIB_COUNT; i++) {
@@ -368,7 +379,7 @@ void *na_dlsym(void *handle, const char *symbol) {
         p = (void *)so_symbol(&lib->mod, symbol);
     } else if (handle >= (void *)&system_handles[0] && handle < (void *)&system_handles[N_SYSTEM_LIBS]) {
         p = na_dynlib_lookup(symbol);
-        if (!p) p = na_gl_get_proc(symbol);
+        if (!p && (p = na_gl_get_proc(symbol))) p = gl_traced(symbol, p);
         if (!p) p = na_aaudio_lookup(symbol);
     } else {
         // RTLD_DEFAULT, RTLD_NEXT or dlopen(NULL)

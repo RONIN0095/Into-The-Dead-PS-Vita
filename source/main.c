@@ -42,6 +42,7 @@ volatile na_frame_stats na_stats;
 void na_java_tick(void); // na_java.c
 void na_gl_log_memory(void); // na_gles3.c
 #include "na_unity.h"
+#include "na_trace.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
 #include "utils/init.h"
@@ -107,28 +108,14 @@ static int watchdog_thread(SceSize args, void *argp) {
             l_warn("Watchdog: no progress for 20 s (%u managed exceptions thrown so far), thread report:", na_throw_count);
             na_threads_report();
             log_flush();
-            {
-                l_warn("Watchdog: which imports the main thread calls, and from where (2 s):");
-                unsigned na_gotprof_run(SceUID tid, int ms);
-                if (na_gotprof_run(main_tid, 2000) == 0) {
-                    // no calls out: it spins inside Unity/IL2CPP code itself
-                    void na_sample_thread(SceUID tid, uintptr_t stack_hi, int count);
-                    SceKernelThreadInfo ti;
-                    memset(&ti, 0, sizeof(ti));
-                    ti.size = sizeof(ti);
-                    if (sceKernelGetThreadInfo(main_tid, &ti) >= 0) {
-                        l_warn("Watchdog: 8 samples of the main thread:");
-                        na_sample_thread(main_tid, (uintptr_t)ti.stack + ti.stackSize, 8);
-                    }
-                }
-            }
+            na_trace_report();
             log_flush();
             log_last_activity_us = saved;
         }
         if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
             // No crash on purpose any more: the Vita's core dump of this
             // port hung at 0% and the console rebooted. The thread report
-            // and the samples above say where the game hangs; it exits.
+            // and the trace above say where the game hangs; it exits.
             if (combo_s >= 3) l_fatal("L+R+SELECT: thread report, then exit.");
             else l_fatal("Watchdog: no progress for 45 s, thread report, then exit.");
             log_flush();
@@ -193,14 +180,22 @@ int main() {
 
     na_thread_register("main", (void *)main);
     main_tid = sceKernelGetThreadId();
+#ifndef NA_RELEASE
+    na_trace_start(); // records the main thread's calls into the loader (hang reports)
+#endif
+    na_main_phase = 1;
     na_unity_start();
 
     int frame = 0;
     while (1) {
+        na_main_phase = 2;
         na_input_poll();
+        na_main_phase = 3;
         na_looper_tick_main();
+        na_main_phase = 4;
         na_java_tick();
         int swaps_before = na_egl_swap_count;
+        na_main_phase = 5;
         int r = na_unity_frame();
 #ifndef NA_RELEASE
         if (frame < 5 || frame % 600 == 0)
@@ -218,12 +213,14 @@ int main() {
             na_gl_log_memory();
         }
 #endif
+        na_main_phase = 6;
         na_filecache_tick(frame);
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)
             sceKernelDelayThread(1000);
         if (frame == 0)
             sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
+        na_main_phase = 7;
         na_hud_tick(frame);
         frame++;
 #ifndef NA_RELEASE
