@@ -32,7 +32,6 @@ volatile int na_main_phase = 0;
 
 #define MAX_FNS 4096
 #define RING 32
-#define BLOCK_SIZE (64 * 1024)
 
 static uintptr_t fn_target[MAX_FNS];
 static const char *fn_name[MAX_FNS];
@@ -65,24 +64,26 @@ __attribute__((naked, target("arm"))) void na_trace_common(void) {
         "bx r12\n");
 }
 
+// The trampolines go into the libraries' patch areas (64 KB each, already
+// readable, writable and executable; so_util allocates them below each
+// library and the port doesn't use them otherwise).
+static int region = 0;
 static int block_init(void) {
-    if (code_next) return 1;
-    SceUID b = kuKernelAllocMemBlock("trace_rwx", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, BLOCK_SIZE, NULL);
-    if (b < 0) {
-        l_warn("[trace] no memory block for trampolines (0x%08x)", b);
-        code_next = code_end = (uint32_t *)1;
-        return 0;
+    while (region < NA_LIB_COUNT) {
+        NaLib *lib = &na_libs[region];
+        if (!code_next && lib->loaded && lib->mod.patch_size) {
+            code_next = (uint32_t *)((lib->mod.patch_head + 7) & ~7u);
+            code_end = (uint32_t *)(lib->mod.patch_base + lib->mod.patch_size);
+        }
+        if (code_next && code_next + 3 <= code_end) return 1;
+        code_next = NULL;
+        region++;
     }
-    void *base;
-    sceKernelGetMemBlockBase(b, &base);
-    kuKernelMemProtect(base, BLOCK_SIZE, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_EXEC);
-    code_next = base;
-    code_end = (uint32_t *)((uintptr_t)base + BLOCK_SIZE);
-    return 1;
+    return 0;
 }
 
 void *na_trace_wrap(const char *name, void *fn) {
-    if (!fn || !block_init() || code_next + 3 > code_end || n_fns >= MAX_FNS) return fn;
+    if (!fn || !block_init() || n_fns >= MAX_FNS) return fn;
     int idx = n_fns++;
     fn_target[idx] = (uintptr_t)fn;
     fn_name[idx] = name;
