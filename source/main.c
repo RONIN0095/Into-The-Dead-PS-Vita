@@ -108,9 +108,19 @@ static int watchdog_thread(SceSize args, void *argp) {
             na_threads_report();
             log_flush();
             {
-                void na_gotprof_run(SceUID tid, int ms);
                 l_warn("Watchdog: which imports the main thread calls, and from where (2 s):");
-                na_gotprof_run(main_tid, 2000);
+                unsigned na_gotprof_run(SceUID tid, int ms);
+                if (na_gotprof_run(main_tid, 2000) == 0) {
+                    // no calls out: it spins inside Unity/IL2CPP code itself
+                    void na_sample_thread(SceUID tid, uintptr_t stack_hi, int count);
+                    SceKernelThreadInfo ti;
+                    memset(&ti, 0, sizeof(ti));
+                    ti.size = sizeof(ti);
+                    if (sceKernelGetThreadInfo(main_tid, &ti) >= 0) {
+                        l_warn("Watchdog: 8 samples of the main thread:");
+                        na_sample_thread(main_tid, (uintptr_t)ti.stack + ti.stackSize, 8);
+                    }
+                }
             }
             log_flush();
             log_last_activity_us = saved;
@@ -121,7 +131,6 @@ static int watchdog_thread(SceSize args, void *argp) {
             // and the samples above say where the game hangs; it exits.
             if (combo_s >= 3) l_fatal("L+R+SELECT: thread report, then exit.");
             else l_fatal("Watchdog: no progress for 45 s, thread report, then exit.");
-            na_threads_report();
             log_flush();
             sceKernelExitProcess(0);
         }
@@ -176,7 +185,7 @@ int main() {
     vglSwapBuffers(GL_FALSE);
 
 #ifndef NA_RELEASE
-    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 + 10, 0x4000, 0, 0, NULL);
+    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 0x10000100 - 20, 0x4000, 0, 0, NULL);
     if (wd >= 0) sceKernelStartThread(wd, 0, NULL);
 #else
     (void)watchdog_thread;

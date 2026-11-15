@@ -120,7 +120,7 @@ static void uninstall(void) {
     for (int i = 0; i < n_slots; i++) *slot_ptr[i] = orig[i];
 }
 
-void na_gotprof_run(SceUID tid, int ms) {
+unsigned na_gotprof_run(SceUID tid, int ms) {
     memset(hist, 0, sizeof(hist));
     calls_watched = calls_other = 0;
     watch_tid = tid;
@@ -141,4 +141,5 @@ void na_gotprof_run(SceUID tid, int ms) {
                fmt(hist[best].key_lr, a, sizeof(a)));
         hist[best].count = 0;
     }
+    return calls_watched;
 }
