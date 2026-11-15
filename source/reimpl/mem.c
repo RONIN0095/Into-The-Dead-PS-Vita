@@ -207,7 +207,17 @@ static void decommit_range(mapping *m, uintptr_t start, uintptr_t end) {
         size_t p = (a - m->base) / MAP_PAGE;
         int have = page_bit(m->commit, p);
         uintptr_t b = a + MAP_PAGE;
-        while (b < end && page_bit(m->commit, (b - m->base) / MAP_PAGE) == have) b += MAP_PAGE;
+        // A committed run ends where its pool pages stop being consecutive
+        // (another commit, another pool block): one decommit per piece as it
+        // was committed. A single decommit across pieces never came back:
+        // Unity's madvise(DONTNEED) hung the main thread in the kernel at the
+        // menu, and the console was unstable afterwards.
+        while (b < end) {
+            size_t q = (b - m->base) / MAP_PAGE;
+            if (page_bit(m->commit, q) != have) break;
+            if (have && (m->pool[q] != m->pool[q - 1] + 1 || m->pool[q] / BLOCK_PAGES != m->pool[q - 1] / BLOCK_PAGES)) break;
+            b += MAP_PAGE;
+        }
         if (have && kuKernelMemDecommit((void *)a, b - a) >= 0) {
             for (uintptr_t q = a; q < b; q += MAP_PAGE) {
                 size_t i = (q - m->base) / MAP_PAGE;
@@ -477,8 +487,18 @@ int na_mprotect(void *addr, size_t length, int prot) {
 int na_madvise(void *addr, size_t length, int advice) {
     if (advice != 4) return 0;
     lock();
+    // MADV_DONTNEED: the pages read as zero afterwards. They keep their
+    // memory (no kernel call here: Unity's madvise was where the main thread
+    // hung in kuKernelMemDecommit); munmap gives it back.
     mapping *m = find_mapping((uintptr_t)addr);
-    if (m && m->uid > 0) decommit_range(m, (uintptr_t)addr, (uintptr_t)addr + length);
+    if (m && m->uid > 0) {
+        uintptr_t start = (uintptr_t)addr, end = start + length;
+        if (start < m->base) start = m->base;
+        if (end > m->base + m->len) end = m->base + m->len;
+        start &= ~(uintptr_t)(MAP_PAGE - 1);
+        for (uintptr_t a = start; a < end; a += MAP_PAGE)
+            if (page_bit(m->commit, (a - m->base) / MAP_PAGE)) memset((void *)a, 0, MAP_PAGE);
+    }
     unlock();
     return 0;
 }
