@@ -217,7 +217,12 @@ static void dispatch(queued *m) {
 // Runs due messages and frame callbacks. Returns microseconds until the next event.
 static uint64_t service(looper *l) {
     uint64_t t = now_us(), next = 16000;
-    for (;;) {
+    // Only messages due when this pass began: one that posts itself again
+    // right away (delay 0) waits for the next pass instead of keeping the
+    // thread here for good, as Android's message queue would interleave it
+    // with everything else.
+    const uint64_t t0 = t;
+    for (int handled = 0; handled < 256; handled++) {
         queued m;
         int found = 0;
         sceKernelLockLwMutex(&l->lock, 1, NULL);
@@ -233,8 +238,9 @@ static uint64_t service(looper *l) {
         sceKernelUnlockLwMutex(&l->lock, 1);
         if (!found) break;
         dispatch(&m);
-        t = now_us();
     }
+    t = now_us();
+    (void)t0;
 
     if (l->n_frame_cbs && t >= l->next_frame_us) {
         jobject cbs[MAX_FRAME_CBS];
