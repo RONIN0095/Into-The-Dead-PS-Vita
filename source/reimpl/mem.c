@@ -37,7 +37,7 @@ void *sceClibMemclr(void *dst, size_t len) {
 #define MAX_MAPPINGS 1024
 #define MAP_PAGE 4096
 
-typedef struct {
+typedef struct mapping_s {
     uintptr_t base;
     size_t len;
     uint8_t *gone;   // one bit per page: unmapped
@@ -47,6 +47,12 @@ typedef struct {
     uint32_t *pool;  // per page: its page in the pool (when it has memory)
     uint8_t *access; // one bit per page: made accessible (gets memory on first touch)
     int dead;        // reservation unmapped: kept for reuse (see munmap)
+    // Lending (see lend_from_dead): a dead reservation lends ranges of its
+    // pages, memory included, to new reservations
+    struct mapping_s *parent; // the reservation this one borrows from
+    size_t parent_page;       // its first page in the parent
+    uint8_t *lent;            // parent: one bit per page lent out
+    size_t n_lent;            // parent: pages lent out
 } mapping;
 
 /*
@@ -302,6 +308,106 @@ static mapping *find_mapping(uintptr_t a) {
     return NULL;
 }
 
+/*
+ * Reservations that Unity unmapped keep their memory (the kernel can't be
+ * asked to take it back, see decommit_range). Reused only for a new
+ * reservation of exactly the same size, they held most of the pool while
+ * the menu loaded (Unity frees a scene's blocks and asks for others), and
+ * the pool ran out. A new reservation now borrows a free range of a dead
+ * one: the addresses and the pages already backed with memory. When it is
+ * unmapped in turn, the range goes back to the dead reservation.
+ */
+#define LEND_ALIGN (1024 * 1024)
+static size_t lent_bytes = 0;
+
+static void *lend_from_dead(size_t len, int slot) {
+    if (slot < 0) return NULL;
+    size_t pages = len / MAP_PAGE, step = LEND_ALIGN / MAP_PAGE;
+    mapping *best = NULL;
+    size_t best_off = 0, best_committed = 0;
+    for (int i = 0; i < MAX_MAPPINGS; i++) {
+        mapping *d = &mappings[i];
+        if (!d->base || !d->dead || d->len < len || d->parent) continue;
+        size_t dp = d->len / MAP_PAGE;
+        size_t first = ((LEND_ALIGN - (d->base % LEND_ALIGN)) % LEND_ALIGN) / MAP_PAGE;
+        for (size_t off = first; off + pages <= dp; off += step) {
+            size_t committed = 0;
+            int free_run = 1;
+            for (size_t k = 0; k < pages; k++) {
+                if (d->lent && page_bit(d->lent, off + k)) {
+                    free_run = 0;
+                    break;
+                }
+                committed += page_bit(d->commit, off + k);
+            }
+            if (free_run && (!best || committed > best_committed)) {
+                best = d;
+                best_off = off;
+                best_committed = committed;
+            }
+        }
+    }
+    if (!best || !best_committed) return NULL; // nothing to gain over a new reservation
+    if (!best->lent && !(best->lent = calloc(1, (best->len / MAP_PAGE + 7) / 8))) return NULL;
+    mapping *c = &mappings[slot];
+    memset(c, 0, sizeof(*c));
+    c->commit = calloc(1, (pages + 7) / 8);
+    c->pool = calloc(pages, sizeof(uint32_t));
+    c->access = calloc(1, (pages + 7) / 8);
+    c->gone = calloc(1, (pages + 7) / 8);
+    if (!c->commit || !c->pool || !c->access || !c->gone) {
+        free(c->commit);
+        free(c->pool);
+        free(c->access);
+        free(c->gone);
+        memset(c, 0, sizeof(*c));
+        return NULL;
+    }
+    for (size_t k = 0; k < pages; k++) {
+        size_t q = best_off + k;
+        best->lent[q / 8] |= 1 << (q % 8);
+        if (page_bit(best->commit, q)) {
+            c->commit[k / 8] |= 1 << (k % 8);
+            c->pool[k] = best->pool[q];
+        }
+    }
+    best->n_lent += pages;
+    c->base = best->base + best_off * MAP_PAGE;
+    c->len = len;
+    c->uid = best->uid;
+    c->parent = best;
+    c->parent_page = best_off;
+    lent_bytes += len;
+    static int logged = 0;
+    if (logged++ < 32)
+        l_info("mmap: %u KB reserved at %p (lent by the unmapped reservation at %p, %u KB with memory)",
+               (unsigned)(len / 1024), (void *)c->base, (void *)best->base, (unsigned)(best_committed * MAP_PAGE / 1024));
+    return (void *)c->base;
+}
+
+// A borrowed range goes back (with whatever memory its pages have now)
+static void give_back(mapping *c) {
+    mapping *p = c->parent;
+    size_t pages = c->len / MAP_PAGE;
+    for (size_t k = 0; k < pages; k++) {
+        size_t q = c->parent_page + k;
+        p->lent[q / 8] &= ~(1 << (q % 8));
+        if (page_bit(c->commit, k)) {
+            p->commit[q / 8] |= 1 << (q % 8);
+            p->pool[q] = c->pool[k];
+        } else {
+            p->commit[q / 8] &= ~(1 << (q % 8));
+        }
+    }
+    p->n_lent -= pages;
+    lent_bytes -= c->len;
+    free(c->commit);
+    free(c->pool);
+    free(c->access);
+    free(c->gone);
+    memset(c, 0, sizeof(*c));
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
     if (length == 0) {
         errno = EINVAL;
@@ -342,7 +448,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             // address space and memory again (pages zeroed, none accessible)
             for (int i = 0; i < MAX_MAPPINGS; i++) {
                 mapping *d = &mappings[i];
-                if (!d->base || !d->dead || d->len != len) continue;
+                if (!d->base || !d->dead || d->len != len || d->n_lent) continue;
                 size_t pages = len / MAP_PAGE;
                 memset(d->gone, 0, (pages + 7) / 8);
                 memset(d->access, 0, (pages + 7) / 8);
@@ -352,6 +458,13 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 static int logged_u = 0;
                 if (logged_u++ < 24) l_info("mmap: %u KB reserved at %p (reused)", (unsigned)(len / 1024), (void *)d->base);
                 return (void *)d->base;
+            }
+            void *lent = lend_from_dead(len, slot);
+            if (lent) {
+                void na_faults_enable(void); // na_dynlib.c
+                na_faults_enable();
+                unlock();
+                return lent;
             }
         }
         if (slot >= 0 && prot == 0 && fd < 0 && len >= RESERVE_MIN) {
@@ -444,6 +557,11 @@ int munmap(void *addr, size_t length) {
             set_access(m, (uintptr_t)addr, (uintptr_t)addr + length, 0);
         }
         if (m->n_gone * MAP_PAGE >= m->len) {
+            if (m->parent) {
+                give_back(m);
+                unlock();
+                return 0;
+            }
             if (m->uid > 0) {
                 // kept with its memory (zeroed above) for the next
                 // reservation of the same size: freeing a block with
