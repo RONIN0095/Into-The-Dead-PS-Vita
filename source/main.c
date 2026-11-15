@@ -108,14 +108,9 @@ static int watchdog_thread(SceSize args, void *argp) {
             na_threads_report();
             log_flush();
             {
-                void na_sample_thread(SceUID tid, uintptr_t stack_hi, int count);
-                SceKernelThreadInfo ti;
-                memset(&ti, 0, sizeof(ti));
-                ti.size = sizeof(ti);
-                if (main_tid >= 0 && sceKernelGetThreadInfo(main_tid, &ti) >= 0) {
-                    l_warn("Watchdog: 10 samples of the main thread:");
-                    na_sample_thread(main_tid, (uintptr_t)ti.stack + ti.stackSize, 10);
-                }
+                void na_gotprof_run(SceUID tid, int ms);
+                l_warn("Watchdog: which imports the main thread calls, and from where (2 s):");
+                na_gotprof_run(main_tid, 2000);
             }
             log_flush();
             log_last_activity_us = saved;
