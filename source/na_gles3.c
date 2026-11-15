@@ -834,6 +834,155 @@ static int etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return to
 int na_etc2_to_dxt5(const void *etc, uint8_t *dxt, int w, int h) { return etc2_to_dxt5(etc, dxt, w, h); }
 
 /*
+ * Texture memory. With the menu loaded, Into the Dead used all of the GPU's
+ * memory and most of the heap, and crashed. Two savings:
+ *  - opaque textures (ETC2 RGB, big ETC1) become DXT1, half a byte a pixel
+ *    (as DXT5 they took one byte: ETC2 RGB went in with a dummy alpha);
+ *  - textures of 1024 or more on a side are halved (the screen is 960x544),
+ *    a quarter of the memory.
+ * The source (ETC2 blocks or RGBA8 pixels) is converted 8 pixel rows at a
+ * time, so no full-size RGBA copy is ever made.
+ */
+typedef struct {
+    const uint8_t *etc;  // RGBA8_ETC2_EAC blocks, or NULL
+    const uint8_t *raw;  // uncompressed pixels (see dxt_source_bpp), or NULL
+    int bpp;
+    GLenum type;
+    uint8_t *out;
+    int w, h, half, dxt1;
+    int row0, rows; // in source block rows (even when halving)
+    int ok;
+} dxt_job;
+
+static void *dxt_band(void *arg) {
+    dxt_job *j = arg;
+    const int w = j->w, ow = j->half ? w / 2 : w, bsz = j->dxt1 ? 8 : 16;
+    const int step = j->half ? 2 : 1; // source block rows per output block row
+    uint8_t *buf = malloc((size_t)w * 4 * 4 * step), *half = j->half ? malloc((size_t)ow * 4 * 4) : NULL;
+    if (!buf || (j->half && !half)) {
+        free(buf);
+        free(half);
+        return NULL;
+    }
+    uint8_t block[64];
+    for (int r = j->row0; r < j->row0 + j->rows; r += step) {
+        const uint8_t *src;
+        if (j->etc) {
+            eac_decode((uint8_t *)j->etc + (size_t)r * (w / 4) * 16, buf, w, 4 * step, EAC_ETC2);
+            src = buf;
+        } else if (j->bpp == 4) {
+            src = j->raw + (size_t)r * 4 * w * 4;
+        } else {
+            size_t n = (size_t)w * 4 * step, first = (size_t)r * 4 * w;
+            const uint8_t *s8 = j->raw + first * 3;
+            const uint16_t *s16 = (const uint16_t *)j->raw + first;
+            uint8_t *o = buf;
+            for (size_t i = 0; i < n; i++, o += 4) {
+                if (j->bpp == 3) {
+                    o[0] = s8[i * 3]; o[1] = s8[i * 3 + 1]; o[2] = s8[i * 3 + 2]; o[3] = 255;
+                    continue;
+                }
+                uint16_t v = s16[i];
+                if (j->type == GL_UNSIGNED_SHORT_4_4_4_4) {
+                    o[0] = ((v >> 12) & 15) * 17; o[1] = ((v >> 8) & 15) * 17; o[2] = ((v >> 4) & 15) * 17; o[3] = (v & 15) * 17;
+                } else if (j->type == GL_UNSIGNED_SHORT_5_5_5_1) {
+                    o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 6) & 31) * 255 / 31; o[2] = ((v >> 1) & 31) * 255 / 31;
+                    o[3] = (v & 1) ? 255 : 0;
+                } else { // 5_6_5
+                    o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 5) & 63) * 255 / 63; o[2] = (v & 31) * 255 / 31; o[3] = 255;
+                }
+            }
+            src = buf;
+        }
+        if (j->half) {
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < ow; x++) {
+                    const uint8_t *a = &src[((2 * y) * w + 2 * x) * 4], *b = a + (size_t)w * 4;
+                    uint8_t *o = &half[(y * ow + x) * 4];
+                    for (int c = 0; c < 4; c++) o[c] = (uint8_t)((a[c] + a[c + 4] + b[c] + b[c + 4] + 2) >> 2);
+                }
+            src = half;
+        }
+        uint8_t *out = j->out + (size_t)(r / step) * (ow / 4) * bsz;
+        for (int bx = 0; bx < ow; bx += 4) {
+            for (int y = 0; y < 4; y++) memcpy(&block[y * 16], &src[(y * ow + bx) * 4], 16);
+            stb_compress_dxt_block(out, block, !j->dxt1, 0);
+            out += bsz;
+        }
+    }
+    free(buf);
+    free(half);
+    j->ok = 1;
+    return NULL;
+}
+
+// Returns the output size (0 on failure); *ow/*oh get the output dimensions
+static size_t to_dxt(const uint8_t *etc, const uint8_t *raw, int bpp, GLenum type, int w, int h, int half, int dxt1, uint8_t *out) {
+    int rows = h / 4, n = rows >= 48 ? 3 : 1;
+    dxt_job jobs[3];
+    pthread_t th[3];
+    int started[3] = { 0, 0, 0 };
+    for (int i = 0; i < n; i++) {
+        int r0 = rows * i / n, r1 = rows * (i + 1) / n;
+        if (half) {
+            r0 &= ~1;
+            r1 = i == n - 1 ? rows : (r1 & ~1);
+        }
+        jobs[i] = (dxt_job){ etc, raw, bpp, type, out, w, h, half, dxt1, r0, r1 - r0, 0 };
+    }
+    for (int i = 1; i < n; i++) {
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, 64 * 1024);
+        started[i] = pthread_create(&th[i], &a, dxt_band, &jobs[i]) == 0;
+        pthread_attr_destroy(&a);
+        if (!started[i]) dxt_band(&jobs[i]);
+    }
+    dxt_band(&jobs[0]);
+    for (int i = 1; i < n; i++)
+        if (started[i]) pthread_join(th[i], NULL);
+    for (int i = 0; i < n; i++)
+        if (!jobs[i].ok) return 0;
+    int ow = half ? w / 2 : w, oh = half ? h / 2 : h;
+    return (size_t)(ow / 4) * (oh / 4) * (dxt1 ? 8 : 16);
+}
+
+static int want_half(int w, int h) { return (w >= 1024 || h >= 1024) && w >= 16 && h >= 16; }
+
+// Set by convert_etc2 when the texture it wrapped has no alpha
+static int etc_opaque = 0;
+
+// Reads a zlib-compressed cache file of exactly `size` bytes
+static int cache_read(const char *path, uint8_t *dst, size_t size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long zn = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *z = zn > 0 ? malloc(zn) : NULL;
+    int ok = 0;
+    if (z && fread(z, 1, zn, f) == (size_t)zn) {
+        uLongf out = size;
+        ok = uncompress(dst, &out, z, zn) == Z_OK && out == size;
+    }
+    free(z);
+    fclose(f);
+    return ok;
+}
+
+static void cache_write(const char *path, const uint8_t *src, size_t size) {
+    mkdir(DATA_PATH "texcache", 0777);
+    uLongf zn = compressBound(size);
+    uint8_t *z = malloc(zn);
+    FILE *f;
+    if (z && compress2(z, &zn, src, size, 1) == Z_OK && (f = fopen(path, "wb"))) {
+        fwrite(z, 1, zn, f);
+        fclose(f);
+    }
+    free(z);
+}
+
+/*
  * Uncompressed textures as DXT5. Into the Dead's UI atlases and many of
  * its textures are RGBA4444 or RGBA32 (2 and 4 bytes a pixel, about 75 MB):
  * with them the GPU's memory ran out while the menu loaded, and the game
@@ -852,147 +1001,66 @@ static int dxt_source_bpp(GLenum format, GLenum type) {
 
 static int rgba_cached_upload(GLenum target, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *data) {
     int bpp = dxt_source_bpp(format, type);
-    if (!bpp || target != GL_TEXTURE_2D || !data || w < 128 || h < 128 || (w & 3) || (h & 3) || w > 2048 || h > 2048) return 0;
-    size_t px = (size_t)w * h, src_size = px * bpp;
-    uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, src_size);
+    if (!bpp || target != GL_TEXTURE_2D || !data || w < 128 || h < 128 || (w & 7) || (h & 7) || w > 2048 || h > 2048) return 0;
+    int opaque = format == GL_RGB, half = want_half(w, h);
+    int ow = half ? w / 2 : w, oh = half ? h / 2 : h;
+    GLenum ofmt = opaque ? 0x83F0 /* DXT1 */ : 0x83F3 /* DXT5 */;
+    size_t osize = (size_t)(ow / 4) * (oh / 4) * (opaque ? 8 : 16);
+    uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, (size_t)w * h * bpp);
     char zpath[140];
-    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/r%08x_%dx%d_%x_%x.dxt5z", (unsigned)crc, w, h, (unsigned)format, (unsigned)type);
-    uint8_t *dxt = malloc(px);
+    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/r%08x_%dx%d_%x_%x%s.dxtz", (unsigned)crc, w, h, (unsigned)format,
+             (unsigned)type, half ? "h" : "");
+    uint8_t *dxt = malloc(osize);
     if (!dxt) return 0;
     static int hits = 0, stored = 0;
-    FILE *f = fopen(zpath, "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long zn = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        uint8_t *z = zn > 0 ? malloc(zn) : NULL;
-        int ok = 0;
-        if (z && fread(z, 1, zn, f) == (size_t)zn) {
-            uLongf out = px;
-            ok = uncompress(dxt, &out, z, zn) == Z_OK && out == px;
-        }
-        free(z);
-        fclose(f);
-        if (ok) {
-            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)px, dxt);
-            free(dxt);
-            if (hits++ < 8) l_info("[texcache] hit %s", zpath);
-            return 1;
-        }
+    if (cache_read(zpath, dxt, osize)) {
+        glCompressedTexImage2D(target, 0, ofmt, ow, oh, 0, (GLsizei)osize, dxt);
+        free(dxt);
+        if (hits++ < 8) l_info("[texcache] hit %s", zpath);
+        return 1;
     }
-    const uint8_t *rgba = data;
-    uint8_t *expanded = NULL;
-    if (bpp != 4) {
-        expanded = malloc(px * 4);
-        if (!expanded) {
-            free(dxt);
-            return 0;
-        }
-        const uint16_t *s16 = data;
-        const uint8_t *s8 = data;
-        uint8_t *o = expanded;
-        for (size_t i = 0; i < px; i++, o += 4) {
-            if (bpp == 3) {
-                o[0] = s8[i * 3]; o[1] = s8[i * 3 + 1]; o[2] = s8[i * 3 + 2]; o[3] = 255;
-                continue;
-            }
-            uint16_t v = s16[i];
-            if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
-                o[0] = ((v >> 12) & 15) * 17; o[1] = ((v >> 8) & 15) * 17; o[2] = ((v >> 4) & 15) * 17; o[3] = (v & 15) * 17;
-            } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-                o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 6) & 31) * 255 / 31; o[2] = ((v >> 1) & 31) * 255 / 31;
-                o[3] = (v & 1) ? 255 : 0;
-            } else { // 5_6_5
-                o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 5) & 63) * 255 / 63; o[2] = (v & 31) * 255 / 31; o[3] = 255;
-            }
-        }
-        rgba = expanded;
-    }
-    int ok = to_dxt5(NULL, rgba, dxt, w, h);
-    free(expanded);
-    if (!ok) {
+    if (to_dxt(NULL, data, bpp, type, w, h, half, opaque, dxt) != osize) {
         free(dxt);
         return 0;
     }
-    glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)px, dxt);
-    mkdir(DATA_PATH "texcache", 0777);
-    uLongf zn = compressBound(px);
-    uint8_t *z = malloc(zn);
-    if (z && compress2(z, &zn, dxt, px, 1) == Z_OK && (f = fopen(zpath, "wb"))) {
-        fwrite(z, 1, zn, f);
-        fclose(f);
-    }
-    free(z);
-    if (stored++ < 8) l_info("[texcache] stored %s", zpath);
+    glCompressedTexImage2D(target, 0, ofmt, ow, oh, 0, (GLsizei)osize, dxt);
+    cache_write(zpath, dxt, osize);
+    if (stored++ < 8) l_info("[texcache] stored %s (%dx%d -> %dx%d)", zpath, w, h, ow, oh);
     free(dxt);
     return 1;
 }
 
 static int etc2_cached_upload(GLenum target, GLenum fmt, GLsizei w, GLsizei h, const void *data, GLsizei size) {
+    int opaque = etc_opaque;
+    etc_opaque = 0;
     if (target != GL_TEXTURE_2D || fmt != 0x9278 || !data) return 0;
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || (w & (w - 1)) || (h & (h - 1))) return 0;
     if (size < w * h) return 0;
-    // Key: CRC32 of all the ETC2 data. (Samples are not enough: some atlases
-    // differ in a few blocks only; 1 in 8 blocks still mixed up 5 textures.)
+    int half = want_half(w, h);
+    int ow = half ? w / 2 : w, oh = half ? h / 2 : h;
+    GLenum ofmt = opaque ? 0x83F0 /* DXT1 */ : 0x83F3 /* DXT5 */;
+    size_t osize = (size_t)(ow / 4) * (oh / 4) * (opaque ? 8 : 16);
+    // Key: CRC32 of all the ETC2 data, the size and the output form
     uint32_t crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), data, w * h);
-    char path[128], zpath[132];
-    snprintf(path, sizeof(path), DATA_PATH "texcache/%08x_%dx%d.dxt5", (unsigned)crc, w, h);
-    snprintf(zpath, sizeof(zpath), "%sz", path);
-    size_t dsize = (size_t)w * h; // DXT5: one byte per pixel
-    uint8_t *dxt = malloc(dsize);
+    char zpath[140];
+    snprintf(zpath, sizeof(zpath), DATA_PATH "texcache/%08x_%dx%d_%s%s.dxtz", (unsigned)crc, w, h, opaque ? "d1" : "d5",
+             half ? "h" : "");
+    uint8_t *dxt = malloc(osize);
     if (!dxt) return 0;
     static int hits = 0, misses = 0;
-    /*
-     * Cache files are zlib-compressed (.dxt5z): DXT5 data of these textures
-     * shrinks to about 13% (large transparent areas), and the memory card
-     * reads only about 10 MB/s, so reading 4 MB per 2048x2048 texture was
-     * most of a level's loading time. Plain .dxt5 files are still read.
-     */
-    FILE *f = fopen(zpath, "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long zn = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        uint8_t *z = zn > 0 ? malloc(zn) : NULL;
-        int ok = 0;
-        if (z && fread(z, 1, zn, f) == (size_t)zn) {
-            uLongf out = dsize;
-            ok = uncompress(dxt, &out, z, zn) == Z_OK && out == dsize;
-        }
-        free(z);
-        fclose(f);
-        if (ok) {
-            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)dsize, dxt);
-            free(dxt);
-            if (hits++ < 8) l_info("[texcache] hit %s", zpath);
-            return 1;
-        }
+    if (cache_read(zpath, dxt, osize)) {
+        glCompressedTexImage2D(target, 0, ofmt, ow, oh, 0, (GLsizei)osize, dxt);
+        free(dxt);
+        if (hits++ < 8) l_info("[texcache] hit %s", zpath);
+        return 1;
     }
-    f = fopen(path, "rb");
-    if (f) {
-        size_t got = fread(dxt, 1, dsize, f);
-        fclose(f);
-        if (got == dsize) {
-            glCompressedTexImage2D(target, 0, 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)dsize, dxt);
-            free(dxt);
-            if (hits++ < 8) l_info("[texcache] hit %s", path);
-            return 1;
-        }
-    }
-    if (!etc2_to_dxt5(data, dxt, w, h)) {
+    if (to_dxt(data, NULL, 0, 0, w, h, half, opaque, dxt) != osize) {
         free(dxt);
         return 0;
     }
-    glCompressedTexImage2D(target, 0, 0x83F3, w, h, 0, (GLsizei)dsize, dxt);
-    mkdir(DATA_PATH "texcache", 0777);
-    uLongf zn = compressBound(dsize);
-    uint8_t *z = malloc(zn);
-    if (z && compress2(z, &zn, dxt, dsize, 1) == Z_OK && (f = fopen(zpath, "wb"))) {
-        fwrite(z, 1, zn, f);
-        fclose(f);
-    }
-    free(z);
-    if (misses++ < 8) l_info("[texcache] stored %s", zpath);
+    glCompressedTexImage2D(target, 0, ofmt, ow, oh, 0, (GLsizei)osize, dxt);
+    cache_write(zpath, dxt, osize);
+    if (misses++ < 8) l_info("[texcache] stored %s (%dx%d -> %dx%d %s)", zpath, w, h, ow, oh, opaque ? "DXT1" : "DXT5");
     free(dxt);
     return 1;
 }
@@ -1255,7 +1323,12 @@ static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLs
 static void *convert_etc2(GLenum *fmt, GLsizei *size, const void **data, GLsizei w, GLsizei h) {
     if (*fmt == 0x9279) *fmt = 0x9278; // SRGB8_ALPHA8_ETC2_EAC -> RGBA8_ETC2_EAC
     if (*fmt == 0x9275) *fmt = 0x9274; // SRGB8_ETC2 -> RGB8_ETC2
+    // ETC1 is ETC2 RGB as far as decoding goes: big ones go the same way,
+    // to be halved (small ones the GPU takes as they are)
+    if (*fmt == 0x8D64 && want_half(w, h)) *fmt = 0x9274;
+    etc_opaque = 0;
     if (*fmt != 0x9274) return NULL;
+    etc_opaque = 1;
     size_t blocks = (size_t)((w + 3) / 4) * ((h + 3) / 4);
     if ((size_t)*size < blocks * 8) blocks = *size / 8;
     uint8_t *out = malloc(blocks * 16);
