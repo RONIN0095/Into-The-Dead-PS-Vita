@@ -377,10 +377,30 @@ static jclass DJ_GetObjectClass(JNIEnv *env, jobject obj) {
     return (jclass)intern_class("java/lang/Object");
 }
 
+/*
+ * instanceof, with the superclasses that matter: Unity 2020.3 checks what
+ * kind of InputEvent nativeInjectEvent got. With an exact class match only,
+ * "is it an android.view.InputEvent" was false for our MotionEvents and
+ * KeyEvents, and every touch and button was dropped.
+ */
+static const char *const superclasses[][2] = {
+    { "android/view/MotionEvent", "android/view/InputEvent" },
+    { "android/view/KeyEvent", "android/view/InputEvent" },
+};
+
 static jboolean DJ_IsInstanceOf(JNIEnv *env, jobject obj, jclass clazz) {
     if (!obj) return JNI_TRUE;
+    if (!clazz) return JNI_FALSE;
+    const char *want = ((DJClass *)clazz)->name;
+    if (strcmp(want, "java/lang/Object") == 0) return JNI_TRUE;
     if (!jo_is_object(obj)) return JNI_FALSE;
-    return ((DJObject *)obj)->cls == (DJClass *)clazz ? JNI_TRUE : JNI_FALSE;
+    DJClass *c = ((DJObject *)obj)->cls;
+    if (c == (DJClass *)clazz || strcmp(c->name, want) == 0) return JNI_TRUE;
+    for (unsigned i = 0; i < sizeof(superclasses) / sizeof(superclasses[0]); i++)
+        if (strcmp(c->name, superclasses[i][0]) == 0 && strcmp(want, superclasses[i][1]) == 0) return JNI_TRUE;
+    static int logged = 0;
+    if (logged++ < 32) l_info("[JO] IsInstanceOf(%s, %s): no", c->name, want);
+    return JNI_FALSE;
 }
 
 static jobject DJ_AllocObject(JNIEnv *env, jclass clazz) {

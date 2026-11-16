@@ -363,6 +363,11 @@ int na_input_event_call(const char *name, const char *sig, jobject self, const j
     if (!motion && !key) return 0;
     int idx = (argc >= 1 && sig[1] == 'I') ? args[0].i : 0;
     char k[16];
+    static int calls_logged = 0;
+    if (calls_logged < 80) {
+        calls_logged++;
+        l_info("[input] Unity asks %s.%s%s", cls, name, sig);
+    }
 
     if (!strcmp(name, "getAction")) r->i = jo_get_int(self, "__action");
     else if (!strcmp(name, "getActionMasked")) r->i = jo_get_int(self, "__action") & 0xff;

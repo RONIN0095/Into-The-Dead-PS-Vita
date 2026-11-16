@@ -165,7 +165,13 @@ void na_unity_inject_event(jobject ev) {
         looked_up = 1;
         inject = native_with_args("nativeInjectEvent", "(Landroid/view/InputEvent;");
     }
-    if (inject) inject(env, player, ev);
+    if (!inject) return;
+    jboolean r = inject(env, player, ev);
+    static int logged = 0;
+    if (logged < 24) {
+        logged++;
+        l_info("[input] nativeInjectEvent(%s, action %d) = %d", jo_class_name(ev), jo_get_int(ev, "__action"), r);
+    }
 }
 
 jobject na_unity_activity(void) {
