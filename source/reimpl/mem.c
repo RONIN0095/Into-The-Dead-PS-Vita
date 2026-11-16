@@ -34,7 +34,7 @@ void *sceClibMemclr(void *dst, size_t len) {
 
 #define MAP_FIXED_BIONIC 0x10
 #define MAP_ANON_BIONIC 0x20
-#define MAX_MAPPINGS 1024
+#define MAX_MAPPINGS 4096
 #define MAP_PAGE 4096
 
 typedef struct mapping_s {
@@ -53,6 +53,7 @@ typedef struct mapping_s {
     size_t parent_page;       // its first page in the parent
     uint8_t *lent;            // parent: one bit per page lent out
     size_t n_lent;            // parent: pages lent out
+    int arena;                // the arena for small mappings (see arena_map)
 } mapping;
 
 /*
@@ -117,7 +118,9 @@ void na_mmap_pool_init(void) {
  * written through the block's own mapping. If kubridge refuses (or the
  * page doesn't read back), the block goes back to the GPU.
  */
-#define POOL_CDRAM_BLOCKS 3
+// One block only: with three (48 MB) the pool had 67 MB to spare while the
+// GPU's memory ran out in the intro scene
+#define POOL_CDRAM_BLOCKS 1
 static int pool_cdram_blocks = 0;
 static size_t pool_reserved_pages = 0; // pool pages used for the tests
 
@@ -435,7 +438,7 @@ static void *lend_from_dead(size_t len, int slot) {
     size_t best_off = 0, best_committed = 0;
     for (int i = 0; i < MAX_MAPPINGS; i++) {
         mapping *d = &mappings[i];
-        if (!d->base || !d->dead || d->len < len || d->parent) continue;
+        if (!d->base || !d->dead || d->len < len || d->parent || d->arena) continue;
         size_t dp = d->len / MAP_PAGE;
         size_t first = ((LEND_ALIGN - (d->base % LEND_ALIGN)) % LEND_ALIGN) / MAP_PAGE;
         for (size_t off = first; off + pages <= dp; off += step) {
@@ -508,12 +511,119 @@ static void give_back(mapping *c) {
         }
     }
     p->n_lent -= pages;
-    lent_bytes -= c->len;
+    if (!p->arena) lent_bytes -= c->len;
     free(c->commit);
     free(c->pool);
     free(c->access);
     free(c->gone);
     memset(c, 0, sizeof(*c));
+}
+
+/*
+ * Small anonymous mappings. Unity maps many of them (64 KB up to under
+ * 1 MB, 38 MB in all by the intro scene); backed by malloc, they filled the
+ * newlib heap, which vitaGL also falls back on for textures, while the
+ * pool still had 67 MB. They now come from one large reservation, the
+ * arena, page by page (first fit), and get memory from the pool on first
+ * touch like the reservations. Unmapped, their pages go back to the arena
+ * with their memory, zeroed, for the next one.
+ */
+#define ARENA_SIZE (96u * 1024 * 1024)
+#define ARENA_MIN (16 * 1024)
+static mapping *arena = NULL;
+static size_t arena_hint = 0;
+
+static void *arena_map(size_t len, int prot, int slot) {
+    if (slot < 0) return NULL;
+    if (!arena) {
+        static int failed = 0;
+        if (failed) return NULL;
+        size_t pages = ARENA_SIZE / MAP_PAGE;
+        void *base = NULL;
+        uint8_t *commit = calloc(1, (pages + 7) / 8), *acc = calloc(1, (pages + 7) / 8), *gone = calloc(1, (pages + 7) / 8),
+                *lent = calloc(1, (pages + 7) / 8);
+        uint32_t *pidx = calloc(pages, sizeof(uint32_t));
+        SceUID uid = commit && acc && gone && lent && pidx && pool_init()
+                         ? kuKernelMemReserve(&base, ARENA_SIZE, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW)
+                         : -1;
+        if (uid <= 0 || !base) {
+            free(commit), free(acc), free(gone), free(lent), free(pidx);
+            failed = 1;
+            l_warn("mmap: no arena for small mappings (0x%08x)", (unsigned)uid);
+            return NULL;
+        }
+        mapping *a = &mappings[slot];
+        memset(a, 0, sizeof(*a));
+        a->base = (uintptr_t)base;
+        a->len = ARENA_SIZE;
+        a->uid = uid;
+        a->commit = commit;
+        a->access = acc;
+        a->gone = gone;
+        a->lent = lent;
+        a->pool = pidx;
+        a->dead = 1; // never found by address: its borrowers are
+        a->arena = 1;
+        arena = a;
+        reserved_bytes += ARENA_SIZE;
+        void na_faults_enable(void); // na_dynlib.c
+        na_faults_enable();
+        l_info("mmap: arena of %u MB for small mappings at %p", (unsigned)(ARENA_SIZE >> 20), base);
+        // the arena took this slot: find another for the mapping
+        slot = -1;
+        for (int i = 0; i < MAX_MAPPINGS; i++)
+            if (!mappings[i].base) {
+                slot = i;
+                break;
+            }
+        if (slot < 0) return NULL;
+    }
+    size_t pages = len / MAP_PAGE, total = ARENA_SIZE / MAP_PAGE, off = (size_t)-1;
+    for (size_t k = 0, run = 0; k < total; k++) {
+        size_t q = (arena_hint + k) % total;
+        if (q == 0) run = 0; // runs don't wrap around
+        if (page_bit(arena->lent, q)) {
+            run = 0;
+            continue;
+        }
+        if (++run == pages) {
+            off = q + 1 - pages;
+            break;
+        }
+    }
+    if (off == (size_t)-1) {
+        static int warned = 0;
+        if (warned++ < 4) l_warn("mmap: arena full (%u KB asked)", (unsigned)(len / 1024));
+        return NULL;
+    }
+    mapping *c = &mappings[slot];
+    memset(c, 0, sizeof(*c));
+    c->commit = calloc(1, (pages + 7) / 8);
+    c->pool = calloc(pages, sizeof(uint32_t));
+    c->access = calloc(1, (pages + 7) / 8);
+    c->gone = calloc(1, (pages + 7) / 8);
+    if (!c->commit || !c->pool || !c->access || !c->gone) {
+        free(c->commit), free(c->pool), free(c->access), free(c->gone);
+        memset(c, 0, sizeof(*c));
+        return NULL;
+    }
+    for (size_t k = 0; k < pages; k++) {
+        size_t q = off + k;
+        arena->lent[q / 8] |= 1 << (q % 8);
+        if (page_bit(arena->commit, q)) {
+            c->commit[k / 8] |= 1 << (k % 8);
+            c->pool[k] = arena->pool[q];
+        }
+        if (prot) c->access[k / 8] |= 1 << (k % 8);
+    }
+    arena->n_lent += pages;
+    arena_hint = off + pages;
+    c->base = arena->base + off * MAP_PAGE;
+    c->len = len;
+    c->uid = arena->uid;
+    c->parent = arena;
+    c->parent_page = off;
+    return (void *)c->base;
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
@@ -556,7 +666,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             // address space and memory again (pages zeroed, none accessible)
             for (int i = 0; i < MAX_MAPPINGS; i++) {
                 mapping *d = &mappings[i];
-                if (!d->base || !d->dead || d->len != len || d->n_lent) continue;
+                if (!d->base || !d->dead || d->len != len || d->n_lent || d->arena) continue;
                 size_t pages = len / MAP_PAGE;
                 memset(d->gone, 0, (pages + 7) / 8);
                 memset(d->access, 0, (pages + 7) / 8);
@@ -608,6 +718,22 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             free(acc);
             free(gone);
             gone = NULL;
+        }
+        if (slot >= 0 && fd < 0 && len >= ARENA_MIN && len < RESERVE_MIN * 4) {
+            void *a = arena_map(len, prot, slot);
+            if (a) {
+                unlock();
+                static int logged_a = 0;
+                if (logged_a++ < 8) l_info("mmap: %u KB from the arena at %p", (unsigned)(len / 1024), a);
+                return a;
+            }
+            // the arena may have taken the slot
+            slot = -1;
+            for (int i = 0; i < MAX_MAPPINGS; i++)
+                if (!mappings[i].base) {
+                    slot = i;
+                    break;
+                }
         }
         if (slot >= 0) {
             gone = calloc(1, (len / MAP_PAGE + 7) / 8);
