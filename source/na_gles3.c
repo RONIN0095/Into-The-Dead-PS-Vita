@@ -747,24 +747,44 @@ static void fb_set_scaled(GLuint fb, int on) {
     }
 }
 
-static void glViewport_na(GLint x, GLint y, GLsizei w, GLsizei h) {
+/*
+ * Viewport and scissor are context state, not framebuffer state: Unity sets
+ * them once and keeps them when it switches framebuffers if the size stays
+ * the same. So the logical (unscaled) values are kept here and applied again,
+ * scaled or not, whenever the draw framebuffer changes. Without this the
+ * 75% viewport of the offscreen target stayed in force for the screen and
+ * the picture came out small in a corner (and touches missed the buttons).
+ */
+static GLint vp_l[4] = { 0, 0, 960, 544 }, sc_l[4] = { 0, 0, 960, 544 };
+static int vp_set = 0, sc_set = 0;
+static void apply_rect(int scissor) {
+    GLint *r = scissor ? sc_l : vp_l;
+    GLint x = r[0], y = r[1], w = r[2], h = r[3];
     if (fb_is_scaled(cur_draw_fb_for_scale)) {
         x = rt_scale(x);
         y = rt_scale(y);
         w = rt_scale(w);
         h = rt_scale(h);
     }
-    glViewport(x, y, w, h);
+    if (scissor) glScissor(x, y, w, h);
+    else glViewport(x, y, w, h);
+}
+
+static void glViewport_na(GLint x, GLint y, GLsizei w, GLsizei h) {
+    vp_l[0] = x, vp_l[1] = y, vp_l[2] = w, vp_l[3] = h;
+    vp_set = 1;
+    apply_rect(0);
 }
 
 static void glScissor_na(GLint x, GLint y, GLsizei w, GLsizei h) {
-    if (fb_is_scaled(cur_draw_fb_for_scale)) {
-        x = rt_scale(x);
-        y = rt_scale(y);
-        w = rt_scale(w);
-        h = rt_scale(h);
-    }
-    glScissor(x, y, w, h);
+    sc_l[0] = x, sc_l[1] = y, sc_l[2] = w, sc_l[3] = h;
+    sc_set = 1;
+    apply_rect(1);
+}
+
+void na_reapply_rects(void) {
+    if (vp_set) apply_rect(0);
+    if (sc_set) apply_rect(1);
 }
 
 static int tex_storage_logged = 0;
@@ -1630,6 +1650,7 @@ static void glFramebufferRenderbuffer_na(GLenum target, GLenum attachment, GLenu
     TRACE("glFramebufferRenderbuffer(0x%x, rb %u%s)", attachment, rb, r && r->tex ? " as texture" : "");
     if (r && r->tex) {
         if (attachment == GL_COLOR_ATTACHMENT0) fb_set_scaled(cur_draw_fb_for_scale, rt_is_screen(r->w, r->h));
+        na_reapply_rects();
         glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, r->tex, 0);
         return;
     }
@@ -1676,6 +1697,7 @@ static void glFramebufferTexture2D_na(GLenum target, GLenum attachment, GLenum t
         return;
     }
     fb_set_scaled(cur_draw_fb_for_scale, scaled_tex_has(tex));
+    na_reapply_rects();
     glFramebufferTexture2D(target, attachment, textarget, tex, level);
     note_filled_id(tex);
 }
@@ -2694,6 +2716,10 @@ static void glBindFramebuffer_na(GLenum target, GLuint fb) {
     if (target == GL_FRAMEBUFFER || target == 0x8CA9) bound_draw_fb = cur_draw_fb_for_scale = fb; // DRAW_FRAMEBUFFER
     if (target == GL_FRAMEBUFFER || target == 0x8CA8) bound_read_fb = fb; // READ_FRAMEBUFFER
     glBindFramebuffer(target, fb);
+    if (target == GL_FRAMEBUFFER || target == 0x8CA9) {
+        extern void na_reapply_rects(void);
+        na_reapply_rects();
+    }
 }
 
 static void save_pixels(const char *name, const uint8_t *px, int w, int h) {
