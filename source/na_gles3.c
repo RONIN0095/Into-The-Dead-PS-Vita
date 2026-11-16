@@ -2434,10 +2434,43 @@ static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const voi
     na_stats.draw_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.draw_n++;
 }
+/*
+ * The shader patcher's work, timed (linked with --wrap): vitaGL asks it for a
+ * new vertex program when a program is drawn with another vertex layout and
+ * for a new fragment program when the blend state changed. In a run about
+ * 40 draws took 40 ms on the CPU.
+ */
+int __real_sceGxmShaderPatcherCreateVertexProgram(SceGxmShaderPatcher *, SceGxmShaderPatcherId, const SceGxmVertexAttribute *,
+                                                  unsigned int, const SceGxmVertexStream *, unsigned int, SceGxmVertexProgram **);
+int __wrap_sceGxmShaderPatcherCreateVertexProgram(SceGxmShaderPatcher *sp, SceGxmShaderPatcherId id, const SceGxmVertexAttribute *a,
+                                                  unsigned int an, const SceGxmVertexStream *st, unsigned int sn,
+                                                  SceGxmVertexProgram **out) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int r = __real_sceGxmShaderPatcherCreateVertexProgram(sp, id, a, an, st, sn, out);
+    na_stats.vp_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.vp_n++;
+    return r;
+}
+int __real_sceGxmShaderPatcherCreateFragmentProgram(SceGxmShaderPatcher *, SceGxmShaderPatcherId, SceGxmOutputRegisterFormat,
+                                                    SceGxmMultisampleMode, const SceGxmBlendInfo *, const SceGxmProgram *,
+                                                    SceGxmFragmentProgram **);
+int __wrap_sceGxmShaderPatcherCreateFragmentProgram(SceGxmShaderPatcher *sp, SceGxmShaderPatcherId id, SceGxmOutputRegisterFormat f,
+                                                    SceGxmMultisampleMode m, const SceGxmBlendInfo *b, const SceGxmProgram *vp,
+                                                    SceGxmFragmentProgram **out) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    int r = __real_sceGxmShaderPatcherCreateFragmentProgram(sp, id, f, m, b, vp, out);
+    na_stats.fp_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.fp_n++;
+    return r;
+}
+
 static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, const void *indices) {
     char desc[96];
     draw_no++;
-    if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;
+    uint64_t c0 = sceKernelGetProcessTimeWide();
+    int ok = check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc));
+    na_stats.check_us += (uint32_t)(sceKernelGetProcessTimeWide() - c0);
+    if (!ok) return;
     int t = trace_this_draw();
     if (t) traced("DrawElements", desc);
     masked_draw_begin();

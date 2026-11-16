@@ -91,7 +91,7 @@ static size_t madvise_calls = 0, madvise_bytes = 0, munmap_calls = 0, munmap_byt
  */
 #define POOL_BLOCK (16u << 20)
 #define BLOCK_PAGES (POOL_BLOCK / MAP_PAGE)
-#define MAX_BLOCKS 16
+#define MAX_BLOCKS 20
 #define POOL_TARGET (184u << 20) // 160 MB ran out in the intro scene; the heap gave 24 MB
 static SceUID pool_uids[MAX_BLOCKS];
 static int pool_blocks = 0, pool_state = 0; // 0 not tried, 1 ready, -1 none
@@ -121,7 +121,10 @@ void na_mmap_pool_init(void) {
  */
 // One block only: with three (48 MB) the pool had 67 MB to spare while the
 // GPU's memory ran out in the intro scene
-#define POOL_CDRAM_BLOCKS 1
+// Two again, and a phycont block as well (below): with Unity's textures at
+// half size (na_hud.c) the GPU's memory had 21 MB free, vitaGL's own 17 MB
+// and all 26 MB of phycont were unused when the pool ran out after a run.
+#define POOL_CDRAM_BLOCKS 2
 static int pool_cdram_blocks = 0;
 static size_t pool_reserved_pages = 0; // pool pages used for the tests
 
@@ -179,7 +182,7 @@ static int pool_init(void) {
     // CDRAM first; if that can't be used, one block of the 26 MB of
     // physically contiguous memory (vitaGL's last resort for textures)
     for (int kind = 0; kind < 2; kind++) {
-        int want = kind == 0 ? POOL_CDRAM_BLOCKS : (pool_cdram_blocks ? 0 : 1);
+        int want = kind == 0 ? POOL_CDRAM_BLOCKS : 1;
         for (int n = 0; n < want && pool_blocks < MAX_BLOCKS; n++) {
             SceUID uid = sceKernelAllocMemBlock(kind == 0 ? "na_mmap_pool_cd" : "na_mmap_pool_pc",
                                                 kind == 0 ? SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW

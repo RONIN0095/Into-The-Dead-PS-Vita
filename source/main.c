@@ -289,11 +289,13 @@ int main() {
         // Hitches: frames over 50 ms, with what they spent their time on
         static int hitches = 0;
         uint32_t ft = last_frame_us ? (uint32_t)((now_us - last_frame_us) / 1000) : 0;
-        if (ft > 50 && frame > 300 && hitches < 300) {
+        if (ft > 40 && frame > 300 && hitches < 400) {
             hitches++;
-            l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms, textures %u in %u ms, shaders %u in %u ms, "
+            l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms [checks %u us, %u vertex programs %u us, "
+                   "%u fragment programs %u us], textures %u in %u ms, shaders %u in %u ms, "
                    "reads %u KB in %u ms, swap %u ms, fence waits %u ms)", frame, ft, unity_us / 1000, na_stats.draw_n,
-                   na_stats.draw_us / 1000, na_stats.tex_n, na_stats.tex_us / 1000,
+                   na_stats.draw_us / 1000, na_stats.check_us, na_stats.vp_n, na_stats.vp_us, na_stats.fp_n, na_stats.fp_us,
+                   na_stats.tex_n, na_stats.tex_us / 1000,
                    na_stats.link_n, na_stats.link_us / 1000, na_stats.read_kb, na_stats.read_us / 1000,
                    na_stats.swap_us / 1000, na_stats.finish_us / 1000);
         }

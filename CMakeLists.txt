@@ -260,6 +260,8 @@ if(NDK_PORT)
 endif()
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
+                      -Wl,--wrap=sceGxmShaderPatcherCreateVertexProgram
+                      -Wl,--wrap=sceGxmShaderPatcherCreateFragmentProgram
                       -Wl,--whole-archive pthread -Wl,--no-whole-archive
                       OpenSLES
                       sndfile
