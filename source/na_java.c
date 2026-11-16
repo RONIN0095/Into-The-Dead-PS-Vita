@@ -488,6 +488,11 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         return r;
     }
 
+    // The game's sound output (na_fmod.c)
+    if (is(cls, "org/fmod/FMODAudioDevice")) {
+        int na_fmod_call(const char *name, jobject self, jvalue *r);
+        if (na_fmod_call(name, self, &r)) return r;
+    }
     // Input events (na_input.c)
     if (self && jo_is_object(self) && na_input_event_call(name, sig, self, args, argc, &r))
         return r;

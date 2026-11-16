@@ -278,6 +278,17 @@ static void pad_update(void *self, void *method) {
 
     void *tc = static_object(&tc_class, &tc_field, "TouchControls2", "instance");
     int shoot_now = 0;
+    // One frame of a run with every draw in the log (as L+R+DOWN does), to see
+    // what the GPU's time goes into: 600 frames into the first run
+    {
+        extern volatile int na_trace_request;
+        static int run_frames = 0, traced = 0;
+        if (mode == 2 && !traced && ++run_frames == 600) {
+            traced = 1;
+            na_trace_request = 1;
+            l_info("[pad] tracing one frame of the run");
+        }
+    }
     if (mode == 2 && tc) {
         static void *switched_tc;
         if (I32(tc, TC_MODE) != 5 && switched_tc != tc) { // once for each run's controls

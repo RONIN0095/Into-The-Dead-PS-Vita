@@ -289,7 +289,7 @@ int main() {
         // Hitches: frames over 50 ms, with what they spent their time on
         static int hitches = 0;
         uint32_t ft = last_frame_us ? (uint32_t)((now_us - last_frame_us) / 1000) : 0;
-        if (ft > 40 && frame > 300 && hitches < 400) {
+        if ((ft > 1000 && frame > 4) || (ft > 40 && frame > 300 && hitches < 400)) { // loads always, slow frames up to 400
             hitches++;
             l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms [checks %u us, %u vertex programs %u us, "
                    "%u fragment programs %u us], textures %u in %u ms, shaders %u in %u ms, "
