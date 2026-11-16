@@ -309,13 +309,8 @@ void *na_dlopen(const char *filename, int flags) {
     return NULL;
 }
 
-/*
- * IL2CPP's garbage collector is off (GC_DONT_GC, see na_dynlib.c). Unity
- * turns it on and triggers collections through these exports; they become
- * no-ops so that no collection ever starts.
- */
+// Incremental collection is not supported here (see intercept below)
 static void gc_noop(void) {}
-static int gc_is_disabled(void) { return 1; }
 static int gc_collect_a_little(void) { return 0; }
 
 // Native stack traces for managed exceptions (Unity adds them to log
@@ -335,12 +330,14 @@ static void *intercept(const char *symbol) {
     }
     if (strncmp(symbol, "il2cpp_gc_", 10) != 0) return NULL;
     const char *s = symbol + 10;
-    if (!strcmp(s, "enable") || !strcmp(s, "collect") || !strcmp(s, "start_incremental_collection") ||
-        !strcmp(s, "set_mode") || !strcmp(s, "set_max_time_slice_ns")) {
-        l_info("dlsym(%s): no-op (GC is off)", symbol);
+    // The collector runs now (signals are emulated, see na_dynlib.c), but
+    // not incrementally: Boehm's incremental mode tracks writes with page
+    // protection and fault handlers, which this port doesn't do. Collections
+    // are whole, when the heap needs them or Unity asks.
+    if (!strcmp(s, "start_incremental_collection") || !strcmp(s, "set_max_time_slice_ns")) {
+        l_info("dlsym(%s): no-op (no incremental collection)", symbol);
         return (void *)&gc_noop;
     }
-    if (!strcmp(s, "is_disabled")) return (void *)&gc_is_disabled;
     if (!strcmp(s, "collect_a_little")) return (void *)&gc_collect_a_little;
     return NULL;
 }

@@ -1404,6 +1404,10 @@ void na_gl_log_memory(void) {
                (unsigned)((_newlib_heap_size_user - (int)mi.arena) / 1024), (unsigned)st[4], na_gc_heap_kb, na_gc_used_kb,
                (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
                (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024));
+        void na_sig_stats(int *sent, int *delivered);
+        int sent = 0, delivered = 0;
+        na_sig_stats(&sent, &delivered);
+        if (sent) l_info("[MEM] GC thread stops: %d signals sent, %d delivered", sent, delivered);
     }
 }
 
@@ -2160,7 +2164,14 @@ static void traced_done(void) {
     l_info("[GL] draw %d ok", draw_no);
 }
 
+static void glDrawArrays_na_inner(GLenum mode, GLint first, GLsizei count);
 static void glDrawArrays_na(GLenum mode, GLint first, GLsizei count) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glDrawArrays_na_inner(mode, first, count);
+    na_stats.draw_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.draw_n++;
+}
+static void glDrawArrays_na_inner(GLenum mode, GLint first, GLsizei count) {
     char desc[96];
     draw_no++;
     if (!check_draw(count, 0, NULL, 0, first, 0, desc, sizeof(desc))) return;
@@ -2285,7 +2296,14 @@ static void draw_cut(GLenum mode, GLsizei count, GLenum type, const void *idx, G
     cur_vao->index_array_unit = saved;
 }
 
+static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, const void *indices);
 static void glDrawElements_na(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    glDrawElements_na_inner(mode, count, type, indices);
+    na_stats.draw_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    na_stats.draw_n++;
+}
+static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, const void *indices) {
     char desc[96];
     draw_no++;
     if (!check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc))) return;

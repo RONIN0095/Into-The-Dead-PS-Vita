@@ -339,13 +339,37 @@ int pthread_mutex_destroy_soloader(pthread_mutex_t_bionic *mutex)
     return ret;
 }
 
+/*
+ * Waits here are signal delivery points (na_dynlib.c, "Signals between
+ * threads"): they wait in slices of a few milliseconds and run pending
+ * signal handlers in between, so a thread waiting for a lock the garbage
+ * collector's thread holds still answers its stop request.
+ */
+void na_sig_poll(void);
+
+static void slice_deadline(struct timespec *abs, long ms) {
+    clock_gettime(CLOCK_REALTIME, abs);
+    abs->tv_nsec += ms * 1000000L;
+    abs->tv_sec += abs->tv_nsec / 1000000000L;
+    abs->tv_nsec %= 1000000000L;
+}
+
+static int before(const struct timespec *a, const struct timespec *b) {
+    return a->tv_sec < b->tv_sec || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
+}
+
 int pthread_mutex_lock_soloader(pthread_mutex_t_bionic *mutex)
 {
     if (!mutex) return EINVAL;
     _mutex_t_static_init(mutex, NULL);
     if (pthread_mutex_trylock(mutex->real_ptr) == 0) return 0;
-    int r = pthread_mutex_lock(mutex->real_ptr);
-    return r;
+    for (;;) {
+        na_sig_poll();
+        struct timespec abs;
+        slice_deadline(&abs, 4);
+        int r = pthread_mutex_timedlock(mutex->real_ptr, &abs);
+        if (r != ETIMEDOUT) return r;
+    }
 }
 
 int pthread_mutex_trylock_soloader(pthread_mutex_t_bionic *mutex)
@@ -417,8 +441,18 @@ int pthread_cond_timedwait_soloader(pthread_cond_t_bionic *cond, pthread_mutex_t
     _cond_t_static_init(cond, NULL);
     _mutex_t_static_init(mutex, NULL);
 
-    int r = pthread_cond_timedwait(cond->real_ptr, mutex->real_ptr, abstime);
-    return r;
+    for (;;) {
+        na_sig_poll();
+        struct timespec slice;
+        slice_deadline(&slice, 4);
+        int last = !abstime || before(abstime, &slice);
+        int r = pthread_cond_timedwait(cond->real_ptr, mutex->real_ptr, last && abstime ? abstime : &slice);
+        if (r != ETIMEDOUT) return r;
+        if (last && abstime) return r;
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (abstime && !before(&now, abstime)) return ETIMEDOUT;
+    }
 }
 
 
@@ -429,8 +463,13 @@ int pthread_cond_wait_soloader(pthread_cond_t_bionic *cond, pthread_mutex_t_bion
     _cond_t_static_init(cond, NULL);
     _mutex_t_static_init(mutex, NULL);
 
-    int r = pthread_cond_wait(cond->real_ptr, mutex->real_ptr);
-    return r;
+    for (;;) {
+        na_sig_poll();
+        struct timespec slice;
+        slice_deadline(&slice, 4);
+        int r = pthread_cond_timedwait(cond->real_ptr, mutex->real_ptr, &slice);
+        if (r != ETIMEDOUT) return r;
+    }
 }
 
 int pthread_cond_broadcast_soloader(pthread_cond_t_bionic *cond)
@@ -566,18 +605,22 @@ int sem_post_soloader (int * uid) {
     return 0;
 }
 
+// abstime is CLOCK_REALTIME; waits in 4 ms slices (signal delivery points)
 int sem_timedwait_soloader (int * uid, const struct timespec * abstime) {
-    uint timeout = 1000;
-    if (sceKernelWaitSema(*uid, 1, &timeout) >= 0)
-        return 0;
-    if (!abstime) return -1;
-    long long now = (long long) current_timestamp_ms() * 1000; // us
-    long long _timeout = abstime->tv_sec * 1000 * 1000 + abstime->tv_nsec / 1000; // us
-    if (_timeout-now >= 0) return -1;
-    uint timeout_real = _timeout - now;
-    if (sceKernelWaitSema(*uid, 1, &timeout_real) < 0)
-        return -1;
-    return 0;
+    for (;;) {
+        na_sig_poll();
+        SceUInt slice = 4000;
+        if (sceKernelWaitSema(*uid, 1, &slice) >= 0)
+            return 0;
+        if (abstime) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (!before(&now, abstime)) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+        }
+    }
 }
 
 int sem_trywait_soloader (int * uid) {
@@ -588,8 +631,10 @@ int sem_trywait_soloader (int * uid) {
 }
 
 int sem_wait_soloader (int * uid) {
-    int r = sceKernelWaitSema(*uid, 1, NULL);
-    if (r < 0)
-        return -1;
-    return 0;
+    for (;;) {
+        na_sig_poll();
+        SceUInt slice = 4000;
+        if (sceKernelWaitSema(*uid, 1, &slice) >= 0)
+            return 0;
+    }
 }

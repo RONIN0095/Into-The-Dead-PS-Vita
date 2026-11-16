@@ -151,6 +151,7 @@ int32_t ANativeWindow_setBuffersGeometry_na(void *w, int32_t width, int32_t heig
  */
 #include <math.h>
 #include <psp2/ctrl.h>
+#include <psp2/motion.h>
 
 #define SENSOR_TYPE_ACCELEROMETER 1
 #define TILT_MAX 35.0f
@@ -207,7 +208,12 @@ int ASensorManager_destroyEventQueue_na(void *m, void *q) {
 int ASensorEventQueue_enableSensor_na(void *q, void *s) {
     if (s != &accel_sensor) return -1;
     sensor_queue.enabled = 1;
-    l_info("[sensor] accelerometer on (left stick)");
+    static int motion_started = 0;
+    if (!motion_started) {
+        motion_started = 1;
+        int r = sceMotionStartSampling();
+        l_info("[sensor] accelerometer on (the Vita's motion sensor, or the left stick): 0x%08x", r);
+    }
     return 0;
 }
 
@@ -242,20 +248,57 @@ static float stick_tilt(void) {
     return x;
 }
 
+/*
+ * The Vita's own accelerometer: tilting the console steers as tilting the
+ * phone does. sceMotion gives the acceleration in g along the console's
+ * axes (x right, y up, z out of the screen), the same axes Android uses for
+ * a device whose natural orientation is landscape. Which way the sign goes
+ * is taken from how the console is held: screen towards the player, so the
+ * reading's y+z (Android's: positive) decides it once the first readings
+ * are in. While the stick (or D-pad) is pushed, it steers instead.
+ */
+static int motion_reading(float *v) {
+    SceMotionState st;
+    memset(&st, 0, sizeof(st));
+    if (sceMotionGetState(&st) < 0) return 0;
+    float x = st.acceleration.x, y = st.acceleration.y, z = st.acceleration.z;
+    if (x * x + y * y + z * z < 0.25f) return 0; // nothing (sampling off)
+    static int n = 0;
+    static float sign = 1.0f, sum = 0.0f;
+    if (n < 20) {
+        sum += y + z;
+        if (++n == 20) {
+            sign = sum >= 0 ? 1.0f : -1.0f;
+            l_info("[sensor] motion sensor: sign %+.0f (y+z %.2f over 20 readings)", sign, sum / 20);
+        }
+    }
+    v[0] = sign * GRAVITY * x;
+    v[1] = sign * GRAVITY * y;
+    v[2] = sign * GRAVITY * z;
+    return 1;
+}
+
 int ASensorEventQueue_getEvents_na(void *q, void *events, int count) {
     if (!sensor_queue.enabled || count < 1 || !events || !sensor_due()) return 0;
     uint64_t now = sceKernelGetProcessTimeWide();
     sensor_queue.next_us = now + sensor_queue.rate_us;
-    float a = stick_tilt() * TILT_MAX * 3.14159265f / 180.0f;
     na_sensor_event *e = events;
     memset(e, 0, sizeof(*e));
     e->version = sizeof(*e);
     e->sensor = 1;
     e->type = SENSOR_TYPE_ACCELEROMETER;
     e->timestamp = (int64_t)now * 1000;
-    e->data[0] = -GRAVITY * sinf(a); // right edge down: x negative
-    e->data[1] = 0.0f;
-    e->data[2] = GRAVITY * cosf(a);
+    float stick = stick_tilt(), v[3];
+    if (stick == 0.0f && motion_reading(v)) {
+        e->data[0] = v[0];
+        e->data[1] = v[1];
+        e->data[2] = v[2];
+    } else {
+        float a = stick * TILT_MAX * 3.14159265f / 180.0f;
+        e->data[0] = -GRAVITY * sinf(a); // right edge down: x negative
+        e->data[1] = 0.0f;
+        e->data[2] = GRAVITY * cosf(a);
+    }
     e->data[3] = 3.0f; // accuracy: high
     return 1;
 }

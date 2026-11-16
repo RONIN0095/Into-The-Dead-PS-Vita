@@ -192,6 +192,7 @@ int main() {
     int frame = 0;
     while (1) {
         na_main_phase = 2;
+        { void na_sig_poll(void); na_sig_poll(); } // signals for the main thread (GC stops)
         na_input_poll();
         na_main_phase = 3;
         na_looper_tick_main();
@@ -199,7 +200,10 @@ int main() {
         na_java_tick();
         int swaps_before = na_egl_swap_count;
         na_main_phase = 5;
+        uint64_t unity_t0 = sceKernelGetProcessTimeWide();
         int r = na_unity_frame();
+        uint32_t unity_us = (uint32_t)(sceKernelGetProcessTimeWide() - unity_t0);
+        (void)unity_us;
 #ifndef NA_RELEASE
         if (frame < 5 || frame % 600 == 0)
         {
@@ -246,8 +250,9 @@ int main() {
         uint32_t ft = last_frame_us ? (uint32_t)((now_us - last_frame_us) / 1000) : 0;
         if (ft > 50 && frame > 300 && hitches < 300) {
             hitches++;
-            l_info("[HITCH] frame %d: %u ms (textures %u in %u ms, shaders %u in %u ms, reads %u KB in %u ms, "
-                   "swap %u ms, fence waits %u ms)", frame, ft, na_stats.tex_n, na_stats.tex_us / 1000,
+            l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms, textures %u in %u ms, shaders %u in %u ms, "
+                   "reads %u KB in %u ms, swap %u ms, fence waits %u ms)", frame, ft, unity_us / 1000, na_stats.draw_n,
+                   na_stats.draw_us / 1000, na_stats.tex_n, na_stats.tex_us / 1000,
                    na_stats.link_n, na_stats.link_us / 1000, na_stats.read_kb, na_stats.read_us / 1000,
                    na_stats.swap_us / 1000, na_stats.finish_us / 1000);
         }

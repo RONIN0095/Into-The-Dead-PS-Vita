@@ -8,6 +8,7 @@ typedef struct {
     uint32_t read_us, read_kb;  // file reads
     uint32_t swap_us;           // eglSwapBuffers
     uint32_t finish_us;         // fence waits (glFinish)
+    uint32_t draw_us, draw_n;   // draw calls (glDrawElements/glDrawArrays, port + vitaGL)
 } na_frame_stats;
 extern volatile na_frame_stats na_stats;
 #endif

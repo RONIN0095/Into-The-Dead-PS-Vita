@@ -586,18 +586,7 @@ static int rwlock_rdlock_na(void *lock) { return pthread_rwlock_rdlock(rwlock_ge
 static int rwlock_wrlock_na(void *lock) { return pthread_rwlock_wrlock(rwlock_get(lock)); }
 static int rwlock_unlock_na(void *lock) { return pthread_rwlock_unlock(rwlock_get(lock)); }
 
-static int pthread_kill_na(pthread_t t, int sig) {
-    // The Boehm GC suspends threads with signals (SIGPWR/SIGXCPU) and then
-    // waits for each one to acknowledge from its signal handler. There are no
-    // signals on the Vita, so "sent" signals hung that wait forever (Unity
-    // stops the world for UnloadUnusedAssets while loading a scene). ESRCH
-    // ("no such thread") is a case the GC handles: it skips the thread.
-    // Collection is off (GC_DONT_GC), so only Unity's liveness scan sees less.
-    if (sig == 0) return 0;
-    static int warned = 0;
-    if (warned++ < 4) l_warn("pthread_kill(%p, %d): no signals here, reporting ESRCH", (void *)t, sig);
-    return 3; // ESRCH (bionic)
-}
+static int pthread_kill_na(pthread_t t, int sig); // see "Signals between threads"
 
 /*
  * Signals (accepted and ignored)
@@ -815,10 +804,124 @@ static void *signal_na(int sig, void *handler) {
     return old;
 }
 
+/*
+ * Signals between threads. IL2CPP's Boehm GC stops the world with them:
+ * pthread_kill(SIGPWR) to every managed thread, whose handler notes its
+ * stack pointer, acknowledges and waits in sigsuspend until pthread_kill
+ * (SIGXCPU) lets it go on. Without signals the collector had to be off,
+ * and the game ran out of memory after a run or two (the managed heap only
+ * grew). The Vita can't interrupt a thread, so a signal is delivered at
+ * the next point where the thread waits or locks in the loader (futex,
+ * mutex, condition variable, semaphore, sleep and yield, all in short
+ * slices) or, for the main thread, between frames: that thread then runs
+ * the handler itself, as Linux would have. A thread that runs on without
+ * passing such a point keeps the collector waiting until it does.
+ */
+#define MAX_SIG_THREADS 128
+static struct {
+    volatile uint32_t thread; // pthread_t
+    volatile uint32_t pending; // bit n-1: signal n
+} sig_threads[MAX_SIG_THREADS];
+static volatile int sig_pending_any = 0;
+static int sig_sent = 0, sig_delivered = 0;
+
+static int sig_slot(uint32_t t, int create) {
+    for (int i = 0; i < MAX_SIG_THREADS; i++)
+        if (sig_threads[i].thread == t) return i;
+    if (!create) return -1;
+    for (int i = 0; i < MAX_SIG_THREADS; i++)
+        if (__sync_bool_compare_and_swap(&sig_threads[i].thread, 0, t)) return i;
+    return -1;
+}
+
+static void futex_wake_all(void);
+
+static int pthread_kill_na(pthread_t t, int sig) {
+    if (sig == 0) return 0;
+    if (sig < 0 || sig >= NSIG_BIONIC || sig > 32) return 22; // EINVAL
+    if ((uintptr_t)sig_actions[sig].handler <= 1) return 0; // default or ignored: nothing to run
+    int i = sig_slot((uint32_t)(uintptr_t)t, 1);
+    if (i < 0) return 3; // ESRCH
+    uint32_t bit = 1u << (sig - 1);
+    if (!(__sync_fetch_and_or(&sig_threads[i].pending, bit) & bit)) __sync_fetch_and_add(&sig_pending_any, 1);
+    sig_sent++;
+    futex_wake_all(); // threads in a futex wait look at once
+    return 0;
+}
+
+// Runs the handler of `sig` in this thread, as a signal would
+static void sig_run(int sig) {
+    __builtin_unwind_init(); // callee-saved registers onto this stack: the GC scans it
+    sigaction_bionic *a = &sig_actions[sig];
+    if ((uintptr_t)a->handler <= 1) return;
+    sig_delivered++;
+    if (a->flags & BIONIC_SA_SIGINFO) {
+        uint32_t info[32], uc[UC_WORDS];
+        memset(info, 0, sizeof(info));
+        memset(uc, 0, sizeof(uc));
+        info[0] = sig;
+        ((void (*)(int, void *, void *))a->handler)(sig, info, uc);
+    } else {
+        ((void (*)(int))a->handler)(sig);
+    }
+}
+
+// Delivers this thread's pending signals that `blocked` doesn't hold back;
+// returns how many
+static int sig_deliver(uint32_t blocked) {
+    int i = sig_slot((uint32_t)(uintptr_t)pthread_self(), 0);
+    if (i < 0) return 0;
+    int n = 0;
+    for (;;) {
+        uint32_t p = sig_threads[i].pending & ~blocked;
+        if (!p) break;
+        int sig = __builtin_ctz(p) + 1;
+        uint32_t bit = 1u << (sig - 1);
+        if (!(__sync_fetch_and_and(&sig_threads[i].pending, ~bit) & bit)) continue;
+        __sync_fetch_and_sub(&sig_pending_any, 1);
+        sig_run(sig);
+        n++;
+    }
+    return n;
+}
+
+// The delivery points call this (cheap when nothing is pending)
+void na_sig_poll(void) {
+    if (sig_pending_any) sig_deliver(0);
+}
+
+void na_sig_stats(int *sent, int *delivered) {
+    *sent = sig_sent;
+    *delivered = sig_delivered;
+}
+
 static int sigsuspend_na(const sigset_bionic *mask) {
-    l_warn("sigsuspend: no signals, returning EINTR");
+    uint32_t blocked = mask ? (uint32_t)*mask : 0;
+    for (;;) {
+        if (sig_pending_any && sig_deliver(blocked)) break;
+        sceKernelDelayThread(200);
+    }
     errno = EINTR;
     return -1;
+}
+
+static int sched_yield_na(void) {
+    na_sig_poll();
+    return sched_yield();
+}
+
+static int usleep_na(useconds_t us) {
+    na_sig_poll();
+    int r = usleep(us);
+    na_sig_poll();
+    return r;
+}
+
+static int nanosleep_na(const struct timespec *req, struct timespec *rem) {
+    na_sig_poll();
+    int r = nanosleep(req, rem);
+    na_sig_poll();
+    return r;
 }
 
 static int sigprocmask_na(int how, const sigset_bionic *set, sigset_bionic *old) {
@@ -1028,6 +1131,13 @@ static pthread_cond_t *futex_bucket(volatile int *addr) {
 }
 
 // Waiters of a bucket are all woken (futex allows spurious wakeups).
+static void futex_wake_all(void) {
+    if (!futex_ready) return;
+    pthread_mutex_lock(&futex_lock);
+    for (int i = 0; i < FUTEX_BUCKETS; i++) pthread_cond_broadcast(&futex_cond[i]);
+    pthread_mutex_unlock(&futex_lock);
+}
+
 static long futex_na(volatile int *addr, int op, int val, const struct timespec *timeout) {
     int cmd = op & 0x7f;
     if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
@@ -1063,6 +1173,7 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         deadline = start + rel_us;
     }
 
+    na_sig_poll();
     pthread_mutex_lock(&futex_lock);
     if (*addr != val) {
         pthread_mutex_unlock(&futex_lock);
@@ -1091,9 +1202,11 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
         int r = pthread_cond_timedwait(futex_bucket(addr), &futex_lock, &abs);
         if (r != ETIMEDOUT) break;   // woken
         if (*addr != val) break;     // changed without a wake we saw
+        if (sig_pending_any) break;  // a signal for someone: return early (allowed)
     }
     na_thread_wait_end();
     pthread_mutex_unlock(&futex_lock);
+    na_sig_poll();
     if (timed_out) {
         errno = ETIMEDOUT;
         return -1;
@@ -1429,6 +1542,9 @@ so_default_dynlib na_dynlib[] = {
     { "sigaddset", (uintptr_t)&sigaddset_na },
     { "sigdelset", (uintptr_t)&sigdelset_na },
     { "sigsuspend", (uintptr_t)&sigsuspend_na },
+    { "sched_yield", (uintptr_t)&sched_yield_na },
+    { "usleep", (uintptr_t)&usleep_na },
+    { "nanosleep", (uintptr_t)&nanosleep_na },
     { "sigprocmask", (uintptr_t)&sigprocmask_na },
     { "pthread_sigmask", (uintptr_t)&sigprocmask_na },
     { "sigaltstack", (uintptr_t)&ret0 },
@@ -1495,7 +1611,7 @@ so_default_dynlib na_dynlib[] = {
 const int na_dynlib_count = sizeof(na_dynlib) / sizeof(na_dynlib[0]);
 
 void na_dynlib_init(void) {
-    setenv_na("GC_DONT_GC", "1", 1);
+    // GC_DONT_GC is gone: the collector runs (see "Signals between threads")
     setenv_na("HOME", DATA_PATH "files", 1);
     setenv_na("TMPDIR", DATA_PATH "cache", 1);
     setenv_na("EXTERNAL_STORAGE", DATA_PATH "external", 1);
