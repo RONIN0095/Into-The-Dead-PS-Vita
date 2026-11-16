@@ -94,7 +94,51 @@ volatile uint32_t na_hud_us = 0; // time spent here, for the frame log (main.c)
  */
 #define TEXTURE_LIMIT 1
 
+/*
+ * Quality settings through Unity's internal calls (the managed setters are
+ * stripped from this game, so the IL2CPP method lookup above finds none):
+ * - masterTextureLimit 1: every mipmapped texture is loaded from its second
+ *   level (half size, a quarter of the memory; UI atlases have no mipmaps
+ *   and stay sharp). Starting a run from the menu ran out of everything at
+ *   once: the reservations' pool, the GPU's memory and vitaGL's own.
+ * - no anti-aliasing, no anisotropic filtering, no shadows, no soft
+ *   particles: GPU time the Vita does not have.
+ * Set again every few seconds: the game applies its own quality level when
+ * its options load.
+ */
+static void quality_tick(void) {
+    static void *(*resolve)(const char *);
+    static int (*get_tex)(void);
+    static void (*set_tex)(int), (*set_aa)(int), (*set_aniso)(int), (*set_shadows)(int), (*set_soft)(int);
+    static int looked = 0;
+    if (!looked) {
+        looked = 1;
+        resolve = sym("il2cpp_resolve_icall");
+        if (!resolve) return;
+        get_tex = resolve("UnityEngine.QualitySettings::get_masterTextureLimit()");
+        set_tex = resolve("UnityEngine.QualitySettings::set_masterTextureLimit(System.Int32)");
+        set_aa = resolve("UnityEngine.QualitySettings::set_antiAliasing(System.Int32)");
+        set_aniso = resolve("UnityEngine.QualitySettings::set_anisotropicFiltering(UnityEngine.AnisotropicFiltering)");
+        set_shadows = resolve("UnityEngine.QualitySettings::set_shadows(UnityEngine.ShadowQuality)");
+        set_soft = resolve("UnityEngine.QualitySettings::set_softParticles(System.Boolean)");
+        l_info("[HUD] quality icalls: texture limit %p/%p, anti-aliasing %p, anisotropic %p, shadows %p, soft particles %p",
+               get_tex, set_tex, set_aa, set_aniso, set_shadows, set_soft);
+    }
+    if (get_tex && set_tex) {
+        int limit = get_tex();
+        if (limit != TEXTURE_LIMIT) {
+            set_tex(TEXTURE_LIMIT);
+            l_info("[HUD] QualitySettings.masterTextureLimit %d -> %d", limit, TEXTURE_LIMIT);
+        }
+    }
+    if (set_aa) set_aa(0);
+    if (set_aniso) set_aniso(0);
+    if (set_shadows) set_shadows(0);
+    if (set_soft) set_soft(0);
+}
+
 void na_hud_tick(int frame) {
+    if (frame == 0 || frame == 2 || frame % 120 == 30) quality_tick();
     if (state < 0 || (frame != 0 && (frame < 30 || frame % 300 != 30))) return;
     uint64_t t_start = sceKernelGetProcessTimeWide();
     if (state == 0) {

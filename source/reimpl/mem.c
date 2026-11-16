@@ -99,6 +99,7 @@ static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
 static uint8_t pool_used[MAX_BLOCKS * BLOCK_PAGES / 8]; // one bit per pool page
 
 static int pool_init(void);
+static int pool_grow(void);
 static void pool_set(size_t i, int v);
 
 // main.c, before vitaGL starts: vitaGL takes all memory left over for its own
@@ -212,6 +213,33 @@ static int pool_init(void) {
     return pool_state > 0;
 }
 
+/*
+ * The pool used up: one more block, of the physically contiguous memory
+ * (26 MB that only vitaGL's last resort for textures uses; 17 MB of it were
+ * free when a run started from the menu found the pool empty).
+ */
+static int pool_grow(void) {
+    static int tried = 0;
+    if (tried || pool_blocks >= MAX_BLOCKS) return 0;
+    tried = 1;
+    SceUID uid = sceKernelAllocMemBlock("na_mmap_pool_pc", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, POOL_BLOCK, NULL);
+    if (uid < 0) {
+        l_warn("mmap: the pool is used up and there is no phycont block for it (0x%08x)", (unsigned)uid);
+        return 0;
+    }
+    if (!cdram_block_works(uid, pool_blocks)) {
+        sceKernelFreeMemBlock(uid);
+        return 0;
+    }
+    pool_set((size_t)pool_blocks * BLOCK_PAGES + BLOCK_PAGES - 1, 1); // stays in the test reservation
+    pool_reserved_pages++;
+    pool_uids[pool_blocks++] = uid;
+    pool_pages = (size_t)pool_blocks * BLOCK_PAGES;
+    pool_free += BLOCK_PAGES - 1;
+    l_warn("mmap: the pool was used up: 16 MB of phycont memory added (%d blocks now)", pool_blocks);
+    return 1;
+}
+
 static int pool_bit(size_t i) { return (pool_used[i / 8] >> (i % 8)) & 1; }
 static void pool_set(size_t i, int v) {
     if (v) pool_used[i / 8] |= 1 << (i % 8);
@@ -261,6 +289,7 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, in
             for (uintptr_t c = a; c < b && ok;) {
                 size_t first = 0, got = 0;
                 int r = -1, plain = 0;
+                if (pool_init() && !pool_free) pool_grow();
                 if (!(pool_init() && pool_free) && plain_pages < PLAIN_MAX_PAGES) {
                     // The pool is used up: the last few MB come from the
                     // kernel page by page (what vitaGL left free)

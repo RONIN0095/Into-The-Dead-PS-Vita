@@ -60,7 +60,8 @@ void na_gl_log_memory(void); // na_gles3.c
 // their memory outside the heap (reimpl/mem.c)
 // 56 MB: the intro scene left 43 MB of the 80 MB heap untouched while the
 // reservations' pool ran out; the pool got the difference (reimpl/mem.c)
-int _newlib_heap_size_user = 56 * 1024 * 1024; // Unity used 36 MB of it; the rest of its memory is reservations
+int _newlib_heap_size_user = 52 * 1024 * 1024; // (56 MB before: 14 MB of it were never touched when everything else ran out)
+// // Unity used 36 MB of it; the rest of its memory is reservations
 
 #ifdef USE_SCELIBC_IO
 int sceLibcHeapSize = 4 * 1024 * 1024;
