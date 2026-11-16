@@ -43,6 +43,7 @@ void na_java_tick(void); // na_java.c
 void na_gl_log_memory(void); // na_gles3.c
 #include "na_unity.h"
 #include "na_trace.h"
+#include "na_modules.h"
 #include "utils/dialog.h"
 #include "utils/glutil.h"
 #include "utils/init.h"
