@@ -213,6 +213,19 @@ int main() {
             na_gl_log_memory();
         }
 #endif
+        if (frame % 30 == 0) {
+            // managed heap size for the memory log (IL2CPP API, main thread only)
+            extern volatile unsigned na_gc_heap_kb, na_gc_used_kb;
+            static int64_t (*heap_size)(void), (*used_size)(void);
+            static int looked = 0;
+            if (!looked) {
+                looked = 1;
+                heap_size = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_gc_get_heap_size");
+                used_size = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_gc_get_used_size");
+            }
+            if (heap_size) na_gc_heap_kb = (unsigned)(heap_size() / 1024);
+            if (used_size) na_gc_used_kb = (unsigned)(used_size() / 1024);
+        }
         na_main_phase = 6;
         na_filecache_tick(frame);
         // Unity skips the swap while it has nothing to show: keep the display alive

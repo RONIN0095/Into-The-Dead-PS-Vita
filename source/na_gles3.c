@@ -747,7 +747,9 @@ static void glCompressedTexSubImage2D_na_inner(GLenum target, GLint level, GLint
 static void glCompressedTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
                                          GLenum format, GLsizei size, const void *data) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    vglUploadScopeBegin(); // vitaGL patch: the upload's transfer copies are freed at once
     glCompressedTexSubImage2D_na_inner(target, level, x, y, w, h, format, size, data);
+    vglUploadScopeEnd();
     na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.tex_n++;
 }
@@ -947,7 +949,18 @@ static size_t to_dxt(const uint8_t *etc, const uint8_t *raw, int bpp, GLenum typ
     return (size_t)(ow / 4) * (oh / 4) * (dxt1 ? 8 : 16);
 }
 
-static int want_half(int w, int h) { return (w >= 1024 || h >= 1024) && w >= 16 && h >= 16; }
+// GPU memory left for textures (all of vitaGL's pools but the newlib heap)
+static size_t gpu_free_bytes(void) {
+    return vglMemFree(VGL_MEM_VRAM) + vglMemFree(VGL_MEM_RAM) + vglMemFree(VGL_MEM_SLOW);
+}
+
+// Halved: textures of 1024 or more on a side, and, once the GPU's memory
+// runs low, every texture of 256x256 or more
+static int want_half(int w, int h) {
+    if (w < 16 || h < 16) return 0;
+    if (w >= 1024 || h >= 1024) return 1;
+    return w >= 256 && h >= 256 && gpu_free_bytes() < 24u * 1024 * 1024;
+}
 
 // Set by convert_etc2 when the texture it wrapped has no alpha
 static int etc_opaque = 0;
@@ -1258,7 +1271,9 @@ static void glTexImage2D_na_inner(GLenum target, GLint level, GLint ifmt, GLsize
 static void glTexImage2D_na(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format,
                             GLenum type, const void *data) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    vglUploadScopeBegin(); // vitaGL patch: the upload's transfer copies are freed at once
     glTexImage2D_na_inner(target, level, ifmt, w, h, border, format, type, data);
+    vglUploadScopeEnd();
     na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.tex_n++;
 }
@@ -1306,7 +1321,9 @@ static void glTexSubImage2D_na_inner(GLenum target, GLint level, GLint x, GLint 
 static void glTexSubImage2D_na(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
                                GLenum type, const void *data) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    vglUploadScopeBegin(); // vitaGL patch: the upload's transfer copies are freed at once
     glTexSubImage2D_na_inner(target, level, x, y, w, h, format, type, data);
+    vglUploadScopeEnd();
     na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.tex_n++;
 }
@@ -1361,22 +1378,32 @@ static void check_upload(const char *what, GLenum ifmt, GLsizei w, GLsizei h) {
 #include <malloc.h>
 extern int _newlib_heap_size_user; // main.c
 
+// Managed heap figures, sampled by the main thread (main.c): IL2CPP's
+// collector is off in this port, so what the game's C# code allocates is
+// never given back
+volatile unsigned na_gc_heap_kb = 0, na_gc_used_kb = 0;
+
 void na_gl_log_memory(void) {
     // newlib heap: what is handed out (uordblks) of the heap grown so far (arena)
     struct mallinfo mi = mallinfo();
     {
         void na_mmap_report(size_t *committed, size_t *reserved); // reimpl/mem.c
-        size_t c = 0, r = 0;
+        void na_mmap_report2(size_t *pool_total_kb, size_t *pool_free_kb, size_t *idle_kb, size_t *stats);
+        size_t c = 0, r = 0, total = 0, left = 0, idle = 0, st[5] = { 0 };
         na_mmap_report(&c, &r);
+        na_mmap_report2(&total, &left, &idle, st);
         int na_mmap_fault_count(void);
-        l_info("[MEM] reservations: %u KB with memory of %u KB reserved (%d first touches)", (unsigned)(c / 1024),
-               (unsigned)(r / 1024), na_mmap_fault_count());
+        l_info("[MEM] reservations: %u KB with memory of %u KB reserved (%d first touches); pool %u KB, %u KB left; "
+               "%u KB in pages the game gave up (madvise %u x %u KB, munmap %u x %u KB)",
+               (unsigned)(c / 1024), (unsigned)(r / 1024), na_mmap_fault_count(), (unsigned)total, (unsigned)left,
+               (unsigned)idle, (unsigned)st[0], (unsigned)st[1], (unsigned)st[2], (unsigned)st[3]);
+        l_info("[MEM] heap: %u KB used, %u KB free in arena, %u KB never touched (plain mmaps %u KB, managed heap %u KB "
+               "with %u KB used); vram %u KB free, vgl ram %u KB, phycont %u KB",
+               (unsigned)(mi.uordblks / 1024), (unsigned)(mi.fordblks / 1024),
+               (unsigned)((_newlib_heap_size_user - (int)mi.arena) / 1024), (unsigned)st[4], na_gc_heap_kb, na_gc_used_kb,
+               (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
+               (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024));
     }
-    l_info("[MEM] heap: %u KB used, %u KB free in arena, %u KB never touched; vram %u KB free, vgl ram %u KB, phycont %u KB",
-           (unsigned)(mi.uordblks / 1024), (unsigned)(mi.fordblks / 1024),
-           (unsigned)((_newlib_heap_size_user - (int)mi.arena) / 1024),
-           (unsigned)(vglMemFree(VGL_MEM_VRAM) / 1024), (unsigned)(vglMemFree(VGL_MEM_RAM) / 1024),
-           (unsigned)(vglMemFree(VGL_MEM_SLOW) / 1024));
 }
 
 static void glCompressedTexImage2D_na_inner(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
@@ -1399,7 +1426,9 @@ static void glCompressedTexImage2D_na_inner(GLenum target, GLint level, GLenum i
 static void glCompressedTexImage2D_na(GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border,
                                       GLsizei size, const void *data) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    vglUploadScopeBegin(); // vitaGL patch: the upload's transfer copies are freed at once
     glCompressedTexImage2D_na_inner(target, level, ifmt, w, h, border, size, data);
+    vglUploadScopeEnd();
     na_stats.tex_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.tex_n++;
 }

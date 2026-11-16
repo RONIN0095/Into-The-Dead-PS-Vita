@@ -1,0 +1,78 @@
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -117,6 +117,52 @@
+ static uint8_t *circular_data_pool_limit;
+ #endif
+ uint32_t circular_data_pool_size = CIRCULAR_POOL_SIZE_DEF;
++/*
++ * Upload scopes (port patch). A compressed texture upload copies its data
++ * into the circular pool as the source of a GPU transfer. The pool is only
++ * rewound when a frame is swapped, and once a frame has used its share,
++ * every further copy is a block of its own that lives until the garbage
++ * collector runs, frames later. A game that loads a scene in one long
++ * frame so kept a second copy of every texture it uploaded, and the GPU's
++ * memory ran out. Between vglUploadScopeBegin and vglUploadScopeEnd, what
++ * an upload takes from the pool is given back as soon as its transfers are
++ * done.
++ */
++#define VGL_UPLOAD_OVERFLOW_MAX 32
++static int vgl_upload_scope = 0;
++static void *vgl_upload_overflow[VGL_UPLOAD_OVERFLOW_MAX];
++static int vgl_upload_overflow_n = 0;
++#ifndef CIRCULAR_POOL_SPEEDHACK
++static uint8_t *vgl_upload_mark = NULL;
++static int vgl_upload_mark_idx = 0;
++#endif
++void vglUploadScopeBegin(void) {
++	if (vgl_upload_scope++)
++		return;
++#ifndef CIRCULAR_POOL_SPEEDHACK
++	vgl_upload_mark = circular_data_pool_ptr[vgl_circular_idx];
++	vgl_upload_mark_idx = vgl_circular_idx;
++#endif
++	vgl_upload_overflow_n = 0;
++}
++void vglUploadScopeEnd(void) {
++	if (!vgl_upload_scope || --vgl_upload_scope)
++		return;
++#ifndef CIRCULAR_POOL_SPEEDHACK
++	if (circular_data_pool_ptr[vgl_upload_mark_idx] == vgl_upload_mark && !vgl_upload_overflow_n)
++		return; // nothing taken
++	sceGxmTransferFinish();
++	if (vgl_upload_mark_idx == vgl_circular_idx)
++		circular_data_pool_ptr[vgl_circular_idx] = vgl_upload_mark;
++#else
++	sceGxmTransferFinish();
++#endif
++	for (int i = 0; i < vgl_upload_overflow_n; i++) {
++		if (vgl_upload_overflow[i])
++			vgl_free(vgl_upload_overflow[i]);
++	}
++	vgl_upload_overflow_n = 0;
++}
+ uint8_t *vgl_reserve_data_pool(uint32_t size) {
+ #ifndef CIRCULAR_POOL_SPEEDHACK
+ 	uint8_t *res = circular_data_pool_ptr[vgl_circular_idx];
+@@ -128,7 +174,10 @@
+ 			vgl_log("%s:%d gpu_alloc_mapped_for_cpu failed with a requested size of %u bytes.\n", __FILE__, __LINE__, size);
+ 		}
+ #endif
+-		mark_as_dirty(res);
++		if (vgl_upload_scope && vgl_upload_overflow_n < VGL_UPLOAD_OVERFLOW_MAX)
++			vgl_upload_overflow[vgl_upload_overflow_n++] = res; // freed by vglUploadScopeEnd
++		else
++			mark_as_dirty(res);
+ 	}
+ #else
+ 	uint8_t *res = circular_data_pool_ptr;
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1227,6 +1227,8 @@
+ 
+ // Change the total memory to use for internal circular pools to use in vitaGL. Disabled with NO_CIRCULAR_POOL. Default value: 32 * 1024 * 1024.
+ void vglSetCircularPoolSize(uint32_t size);
++void vglUploadScopeBegin(void);
++void vglUploadScopeEnd(void);
+ 
+ // Sets the number of buffers to use for the display swapchain. Default value: 3.
+ void vglSetDisplayBufferCount(int count);

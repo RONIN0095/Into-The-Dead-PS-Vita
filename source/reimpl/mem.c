@@ -71,6 +71,7 @@ typedef struct mapping_s {
 #include <psp2/kernel/sysmem.h>
 #define RESERVE_MIN (1024 * 1024)
 static size_t committed_bytes = 0, reserved_bytes = 0;
+static size_t madvise_calls = 0, madvise_bytes = 0, munmap_calls = 0, munmap_bytes = 0, plain_mmap_bytes = 0;
 
 /*
  * The memory comes from a pool: one memory block taken at the first
@@ -97,11 +98,68 @@ static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
 static uint8_t pool_used[MAX_BLOCKS * BLOCK_PAGES / 8]; // one bit per pool page
 
 static int pool_init(void);
+static void pool_set(size_t i, int v);
 
 // main.c, before vitaGL starts: vitaGL takes all memory left over for its own
 // pool, so the reservations' pool is taken first
 void na_mmap_pool_init(void) {
     pool_init();
+}
+
+/*
+ * More pool from the GPU's memory. Main memory is what runs out (libraries,
+ * heap and 160 MB of pool fill it), while of the 128 MB of CDRAM the game's
+ * textures need well under half. CDRAM blocks can't be used as they are
+ * (they are mapped uncached, far too slow for a heap), but their physical
+ * pages can back a reservation like any pool block's, and there they are
+ * mapped like normal memory. Each block is tried first: one of its pages is
+ * committed into a small test reservation and must read back what was
+ * written through the block's own mapping. If kubridge refuses (or the
+ * page doesn't read back), the block goes back to the GPU.
+ */
+#define POOL_CDRAM_BLOCKS 3
+static int pool_cdram_blocks = 0;
+static size_t pool_reserved_pages = 0; // pool pages used for the tests
+
+static int cdram_block_works(SceUID uid, int index) {
+    static void *trial = NULL;
+    static int trial_n = 0;
+    if (!trial) {
+        SceUID r = kuKernelMemReserve(&trial, 1024 * 1024, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
+        if (r < 0 || !trial) {
+            l_warn("mmap: no test reservation for CDRAM pool blocks (0x%08x)", (unsigned)r);
+            trial = NULL;
+            return 0;
+        }
+    }
+    void *blk = NULL;
+    if (sceKernelGetMemBlockBase(uid, &blk) < 0 || !blk) return 0;
+    size_t off = POOL_BLOCK - MAP_PAGE; // the block's last page
+    volatile uint32_t *direct = (volatile uint32_t *)((uintptr_t)blk + off);
+    uint32_t pattern = 0xC0DE0000u + (uint32_t)index;
+    direct[0] = pattern;
+    direct[1023] = ~pattern;
+    void *at = (void *)((uintptr_t)trial + (size_t)trial_n++ * MAP_PAGE);
+    KuKernelMemCommitOpt opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.size = sizeof(opt);
+    opt.attr = KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE;
+    opt.baseBlock = uid;
+    opt.baseOffset = off;
+    int r = kuKernelMemCommit(at, MAP_PAGE, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE, &opt);
+    if (r < 0) {
+        l_warn("mmap: kubridge can't map this block's pages into a reservation (0x%08x)", (unsigned)r);
+        return 0;
+    }
+    volatile uint32_t *mapped = at;
+    if (mapped[0] != pattern || mapped[1023] != ~pattern) {
+        l_warn("mmap: the block's page mapped into a reservation reads %08x, not %08x", (unsigned)mapped[0],
+               (unsigned)pattern);
+        return 0;
+    }
+    mapped[0] = 0;
+    mapped[1023] = 0;
+    return 1;
 }
 
 static int pool_init(void) {
@@ -111,11 +169,39 @@ static int pool_init(void) {
         if (uid < 0) break;
         pool_uids[pool_blocks++] = uid;
     }
+    int main_blocks = pool_blocks, phycont_blocks = 0;
+    // CDRAM first; if that can't be used, one block of the 26 MB of
+    // physically contiguous memory (vitaGL's last resort for textures)
+    for (int kind = 0; kind < 2; kind++) {
+        int want = kind == 0 ? POOL_CDRAM_BLOCKS : (pool_cdram_blocks ? 0 : 1);
+        for (int n = 0; n < want && pool_blocks < MAX_BLOCKS; n++) {
+            SceUID uid = sceKernelAllocMemBlock(kind == 0 ? "na_mmap_pool_cd" : "na_mmap_pool_pc",
+                                                kind == 0 ? SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW
+                                                          : SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW,
+                                                POOL_BLOCK, NULL);
+            if (uid < 0) {
+                l_warn("mmap: no %s block for the pool (0x%08x)", kind == 0 ? "CDRAM" : "phycont", (unsigned)uid);
+                break;
+            }
+            if (!cdram_block_works(uid, pool_blocks)) {
+                sceKernelFreeMemBlock(uid);
+                break;
+            }
+            // its last page stays in the test reservation
+            pool_set((size_t)pool_blocks * BLOCK_PAGES + BLOCK_PAGES - 1, 1);
+            pool_reserved_pages++;
+            pool_uids[pool_blocks++] = uid;
+            if (kind == 0) pool_cdram_blocks++;
+            else phycont_blocks++;
+        }
+    }
     pool_pages = (size_t)pool_blocks * BLOCK_PAGES;
-    pool_free = pool_pages;
+    pool_free = pool_pages - pool_reserved_pages;
     pool_state = pool_blocks ? 1 : -1;
     if (pool_blocks)
-        l_info("mmap: memory pool of %u MB for reservations", (unsigned)(pool_blocks * (POOL_BLOCK >> 20)));
+        l_info("mmap: memory pool of %u MB for reservations (%u MB main memory, %u MB CDRAM, %u MB phycont)",
+               (unsigned)(pool_blocks * (POOL_BLOCK >> 20)), (unsigned)(main_blocks * (POOL_BLOCK >> 20)),
+               (unsigned)(pool_cdram_blocks * (POOL_BLOCK >> 20)), (unsigned)(phycont_blocks * (POOL_BLOCK >> 20)));
     else
         l_error("mmap: no memory pool for reservations");
     return pool_state > 0;
@@ -148,6 +234,10 @@ static int pool_take(size_t want, size_t *first, size_t *got) {
 
 static int page_bit(const uint8_t *bits, size_t p) { return (bits[p / 8] >> (p % 8)) & 1; }
 
+#define NO_POOL_PAGE 0xFFFFFFFFu
+#define PLAIN_MAX_PAGES (6u * 1024 * 1024 / MAP_PAGE)
+static size_t plain_pages = 0;
+
 // Gives the pages of [start, end) memory (zeroed when `zero`, or when new)
 static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, int only_access) {
     if (start < m->base) start = m->base;
@@ -165,8 +255,22 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, in
         if (!have) {
             for (uintptr_t c = a; c < b && ok;) {
                 size_t first = 0, got = 0;
-                int r = -1;
-                if (pool_init() && pool_take((b - c) / MAP_PAGE, &first, &got)) {
+                int r = -1, plain = 0;
+                if (!(pool_init() && pool_free) && plain_pages < PLAIN_MAX_PAGES) {
+                    // The pool is used up: the last few MB come from the
+                    // kernel page by page (what vitaGL left free)
+                    got = (b - c) / MAP_PAGE;
+                    if (got > 4) got = 4;
+                    r = kuKernelMemCommit((void *)c, got * MAP_PAGE, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE, NULL);
+                    if (r >= 0) {
+                        if (!plain_pages) l_warn("mmap: the pool is used up, taking pages from the kernel");
+                        plain_pages += got;
+                        first = 0;
+                        plain = 1;
+                    } else {
+                        plain_pages = PLAIN_MAX_PAGES; // the kernel has none either
+                    }
+                } else if (pool_init() && pool_take((b - c) / MAP_PAGE, &first, &got)) {
                     KuKernelMemCommitOpt opt;
                     memset(&opt, 0, sizeof(opt));
                     opt.size = sizeof(opt);
@@ -191,7 +295,7 @@ static int commit_range(mapping *m, uintptr_t start, uintptr_t end, int zero, in
                 for (size_t j = 0; j < got; j++) {
                     size_t i = (c - m->base) / MAP_PAGE + j;
                     m->commit[i / 8] |= 1 << (i % 8);
-                    m->pool[i] = (uint32_t)(first + j);
+                    m->pool[i] = plain ? NO_POOL_PAGE : (uint32_t)(first + j);
                 }
                 committed_bytes += got * MAP_PAGE;
                 memset((void *)c, 0, got * MAP_PAGE);
@@ -243,7 +347,10 @@ static void set_access(mapping *m, uintptr_t start, uintptr_t end, int on) {
  * (na_dynlib.c's abort handler), 64 KB around the address get memory, and
  * the instruction runs again.
  */
-#define FAULT_CHUNK (64 * 1024)
+// 32 KB a touch: with 64 KB, nearly all of the pool's 160 MB had been handed
+// out by 2400 touches when the game ran out of it. (Not less: every commit
+// makes page objects in the kernel, and how many it has is unknown.)
+#define FAULT_CHUNK (32 * 1024)
 static int faults = 0;
 int na_mmap_fault(uint32_t addr) {
     lock();
@@ -267,6 +374,7 @@ void na_mmap_report(size_t *committed, size_t *reserved) {
     *committed = committed_bytes;
     *reserved = reserved_bytes;
 }
+
 
 static void mark_pages(mapping *m, uintptr_t start, uintptr_t end, int unmapped) {
     if (start < m->base) start = m->base;
@@ -513,6 +621,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
             return MAP_FAILED;
         }
         memset(ret, 0, len);
+        plain_mmap_bytes += len;
         mappings[slot].base = (uintptr_t)ret;
         mappings[slot].len = len;
         mappings[slot].gone = gone;
@@ -549,6 +658,8 @@ int munmap(void *addr, size_t length) {
     lock();
     mapping *m = find_mapping((uintptr_t)addr);
     if (m) {
+        munmap_calls++;
+        munmap_bytes += length;
         // pages are counted once even if unmapped repeatedly; the memory is
         // freed when every page of the mapping is unmapped
         mark_pages(m, (uintptr_t)addr, (uintptr_t)addr + length, 1);
@@ -570,6 +681,7 @@ int munmap(void *addr, size_t length) {
                 unlock();
                 return 0;
             } else {
+                plain_mmap_bytes -= m->len;
                 free((void *)m->base);
             }
             free(m->gone);
@@ -606,6 +718,8 @@ int na_mprotect(void *addr, size_t length, int prot) {
 int na_madvise(void *addr, size_t length, int advice) {
     if (advice != 4) return 0;
     lock();
+    madvise_calls++;
+    madvise_bytes += length;
     // MADV_DONTNEED: the pages read as zero afterwards. They keep their
     // memory (no kernel call here: Unity's madvise was where the main thread
     // hung in kuKernelMemDecommit); munmap gives it back.
@@ -645,4 +759,28 @@ void na_mmap_touch(const void *buf, size_t len) {
         a = e;
     }
     unlock();
+}
+
+// More for the memory log: what is left of the pool, and how much memory
+// sits in pages the game gave up (unmapped or protected again after
+// madvise(DONTNEED)): it stays where it is (see decommit_range).
+void na_mmap_report2(size_t *pool_total_kb, size_t *pool_free_kb, size_t *idle_kb, size_t *stats) {
+    size_t idle = 0;
+    for (int i = 0; i < MAX_MAPPINGS; i++) {
+        mapping *m = &mappings[i];
+        if (!m->base || m->uid <= 0 || !m->commit) continue;
+        size_t pages = m->len / MAP_PAGE;
+        for (size_t p = 0; p < pages; p++) {
+            if (m->lent && page_bit(m->lent, p)) continue; // counted in the borrower
+            if (page_bit(m->commit, p) && (m->dead || !page_bit(m->access, p))) idle++;
+        }
+    }
+    *pool_total_kb = (pool_pages - pool_reserved_pages) * (MAP_PAGE / 1024) + plain_pages * (MAP_PAGE / 1024);
+    *pool_free_kb = pool_free * (MAP_PAGE / 1024);
+    *idle_kb = idle * (MAP_PAGE / 1024);
+    stats[0] = madvise_calls;
+    stats[1] = madvise_bytes / 1024;
+    stats[2] = munmap_calls;
+    stats[3] = munmap_bytes / 1024;
+    stats[4] = plain_mmap_bytes / 1024;
 }

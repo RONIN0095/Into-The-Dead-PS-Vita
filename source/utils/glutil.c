@@ -26,6 +26,10 @@ void gl_preload() {
 
 void gl_init() {
     // No MSAA: Unity renders into its own FBOs and blits to the screen.
+    // vitaGL's circular pool: 16 MB instead of its default 32 MB (taken from
+    // the GPU's memory). Unity draws from its own buffers; the pool is for
+    // the copies texture uploads make, at most 4 MB at a time.
+    vglSetCircularPoolSize(16 * 1024 * 1024);
     vglInitExtended(0, 960, 544, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
     na_gles3_init();
 }
