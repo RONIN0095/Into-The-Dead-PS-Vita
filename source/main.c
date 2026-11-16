@@ -207,6 +207,16 @@ int main() {
         int r = na_unity_frame();
         uint32_t unity_us = (uint32_t)(sceKernelGetProcessTimeWide() - unity_t0);
         (void)unity_us;
+        // nativeRender false for good: Unity has quit (Application.Quit,
+        // Back in the main menu). Leave instead of looping on.
+        static uint64_t quit_since = 0;
+        if (r) quit_since = 0;
+        else if (!quit_since) quit_since = sceKernelGetProcessTimeWide();
+        else if (sceKernelGetProcessTimeWide() - quit_since > 3000000ULL) {
+            l_info("Unity has quit (nativeRender false for 3 s): exiting.");
+            log_flush();
+            sceKernelExitProcess(0);
+        }
 #ifndef NA_RELEASE
         if (frame < 5 || frame % 600 == 0)
         {

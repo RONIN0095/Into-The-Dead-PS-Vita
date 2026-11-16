@@ -493,6 +493,18 @@ jvalue jo_java_call(const char *cls, const char *name, const char *sig,
         return r;
     if (!self && na_input_static_call(cls, name, args, argc, &r))
         return r;
+    // KeyCharacterMap: Unity loads one for each key event's device to get the
+    // key's character; a null map there was the last thing before the game
+    // stopped rendering for good. Keys here type nothing.
+    if (strstr(sc, "KeyCharacterMap") || strstr(cls, "KeyCharacterMap")) {
+        static jobject kcm = NULL;
+        if (is(name, "load")) {
+            if (!kcm) kcm = jo_new_object("android/view/KeyCharacterMap");
+            r.l = kcm;
+        } else if (is(name, "getKeyboardType")) r.i = 1; // NUMERIC
+        else r = default_return(sig); // get(), getDisplayLabel(), ...: 0
+        return r;
+    }
     if (strstr(sc, "InputDevice") || strstr(cls, "InputDevice")) {
         if (is(name, "getSources")) r.i = 0x1002 | 0x401 | 0x101;
         else if (is(name, "getName")) r.l = jstr("PS Vita");

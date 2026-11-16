@@ -722,14 +722,28 @@ static int scaled_tex_has(GLuint tex) {
     return 0;
 }
 
-#define MAX_FBS 1024
-static uint8_t fb_scaled[MAX_FBS]; // by framebuffer name (Unity's are small numbers)
+// Framebuffers with a scaled colour target (vitaGL's names are pointers)
+#define MAX_FBS 256
+static GLuint fb_scaled[MAX_FBS];
 static GLuint cur_draw_fb_for_scale = 0;
-static int fb_is_scaled(GLuint fb) { return fb && fb < MAX_FBS && fb_scaled[fb]; }
+static int fb_is_scaled(GLuint fb) {
+    if (!fb) return 0;
+    for (int i = 0; i < MAX_FBS; i++)
+        if (fb_scaled[i] == fb) return 1;
+    return 0;
+}
 static void fb_set_scaled(GLuint fb, int on) {
-    if (fb && fb < MAX_FBS) {
-        if (fb_scaled[fb] != on) l_info("[GL] framebuffer %u renders at %d%%", fb, on ? 100 * RT_SCALE_NUM / RT_SCALE_DEN : 100);
-        fb_scaled[fb] = on;
+    if (!fb || fb_is_scaled(fb) == on) return;
+    l_info("[GL] framebuffer 0x%x renders at %d%%", fb, on ? 100 * RT_SCALE_NUM / RT_SCALE_DEN : 100);
+    for (int i = 0; i < MAX_FBS; i++) {
+        if (on && !fb_scaled[i]) {
+            fb_scaled[i] = fb;
+            return;
+        }
+        if (!on && fb_scaled[i] == fb) {
+            fb_scaled[i] = 0;
+            return;
+        }
     }
 }
 

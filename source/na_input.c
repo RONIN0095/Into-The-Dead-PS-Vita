@@ -309,6 +309,11 @@ static const struct {
 static uint32_t prev_buttons = 0;
 
 static void send_key(int action, int keycode) {
+    static int logged = 0;
+    if (logged < 40) {
+        logged++;
+        l_info("[input] key %d %s", keycode, action == 0 ? "down" : "up");
+    }
     jobject ev = jo_new_object("android/view/KeyEvent");
     jo_set_int(ev, "__action", action);
     jo_set_int(ev, "__keycode", keycode);
@@ -327,9 +332,8 @@ static void poll_buttons(void) {
     for (unsigned i = 0; i < sizeof(keymap) / sizeof(keymap[0]); i++)
         if (changed & keymap[i].button)
             send_key((pad.buttons & keymap[i].button) ? 0 : 1, keymap[i].keycode);
-    // menus: Circle is Android's Back (Unity's Escape) as well
-    if ((changed & SCE_CTRL_CIRCLE) && !na_hud_in_level())
-        send_key((pad.buttons & SCE_CTRL_CIRCLE) ? 0 : 1, 4);
+    // No key is Android's Back any more except SELECT: Circle as Back quit the
+    // game from its main menu (Escape there means "leave the app")
     prev_buttons = pad.buttons;
 }
 
