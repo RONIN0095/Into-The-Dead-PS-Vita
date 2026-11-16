@@ -207,6 +207,10 @@ int main() {
         int r = na_unity_frame();
         uint32_t unity_us = (uint32_t)(sceKernelGetProcessTimeWide() - unity_t0);
         (void)unity_us;
+        { void na_sensor_service(void); na_sensor_service(); } // accelerometer events (tilt)
+#ifndef NA_RELEASE
+        { void na_input_probe(void); na_input_probe(); } // what Unity makes of touches
+#endif
         // nativeRender false for good: Unity has quit (Application.Quit,
         // Back in the main menu). Leave instead of looping on.
         static uint64_t quit_since = 0;

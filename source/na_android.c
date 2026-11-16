@@ -330,6 +330,23 @@ static int sensor_poll(na_looper *l, int timeout_ms, int *fd, int *events, void 
     return ALOOPER_POLL_TIMEOUT;
 }
 
+/*
+ * The accelerometer's queue sits on the main thread's looper with a
+ * callback: on Android the Java main loop polls that looper and so runs the
+ * callback, which reads the events. Nothing polls the main looper here, so
+ * the main loop calls this every frame (before this, Unity never got a
+ * single reading: tilt did nothing).
+ */
+void na_sensor_service(void) {
+    if (!sensor_queue.enabled || !sensor_queue.cb || !sensor_due()) return;
+    static int logged = 0;
+    if (logged < 3) {
+        logged++;
+        l_info("[sensor] main loop runs the queue callback %p", sensor_queue.cb);
+    }
+    sensor_queue.cb(-1, 1, sensor_queue.data);
+}
+
 const char *ASensor_getName_na(void *s) { return "Vita left stick"; }
 const char *ASensor_getVendor_na(void *s) { return "Sony"; }
 int ASensor_getType_na(void *s) { return s == &accel_sensor ? SENSOR_TYPE_ACCELEROMETER : -1; }

@@ -32,6 +32,7 @@
 #include "na_unity.h"
 #include "na_hud.h"
 #include "utils/logger.h"
+#include "na_modules.h"
 
 #define ACTION_DOWN 0
 #define ACTION_UP 1
@@ -424,4 +425,52 @@ int na_input_event_call(const char *name, const char *sig, jobject self, const j
     else
         return 0;
     return 1;
+}
+
+int na_input_fingers(void) { return n_prev; }
+
+/*
+ * Input probe: while a finger is down (and a little after), what Unity's
+ * own Input class reports, through its internal calls: touch count, the
+ * first touch's position and phase, the mouse Unity simulates from touches
+ * and the screen size. Shows where a tap gets lost. Main thread, between
+ * frames.
+ */
+void na_input_probe(void) {
+    static int (*touch_count)(void);
+    static void (*get_touch)(int, void *);
+    static void (*mouse_pos)(float *);
+    static int (*mouse_button)(int);
+    static int (*screen_w)(void), (*screen_h)(void);
+    static int looked = 0, logged = 0, after = 0;
+    if (logged >= 150) return;
+    if (!looked) {
+        looked = 1;
+        void *(*resolve)(const char *) = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_resolve_icall");
+        if (!resolve) return;
+        touch_count = resolve("UnityEngine.Input::get_touchCount()");
+        get_touch = resolve("UnityEngine.Input::GetTouch_Injected(System.Int32,UnityEngine.Touch&)");
+        mouse_pos = resolve("UnityEngine.Input::get_mousePosition_Injected(UnityEngine.Vector3&)");
+        mouse_button = resolve("UnityEngine.Input::GetMouseButton(System.Int32)");
+        screen_w = resolve("UnityEngine.Screen::get_width()");
+        screen_h = resolve("UnityEngine.Screen::get_height()");
+        l_info("[probe] icalls: touchCount %p, GetTouch %p, mousePosition %p, GetMouseButton %p, Screen %p/%p",
+               touch_count, get_touch, mouse_pos, mouse_button, screen_w, screen_h);
+    }
+    if (n_prev > 0) after = 4;
+    else if (after > 0) after--;
+    else return;
+    logged++;
+    int tc = touch_count ? touch_count() : -1;
+    float t[32];
+    memset(t, 0, sizeof(t));
+    if (get_touch && tc > 0) get_touch(0, t);
+    float m[3] = { 0, 0, 0 };
+    if (mouse_pos) mouse_pos(m);
+    int mb = mouse_button ? mouse_button(0) : -1;
+    int *ti = (int *)t;
+    // Touch: fingerId, position, rawPosition, positionDelta, timeDelta, tapCount, phase, type
+    l_info("[probe] fingers %d (at %.0f,%.0f) -> Unity: touches %d [id %d at %.1f,%.1f tap %d phase %d], mouse %.1f,%.1f button %d, screen %dx%d",
+           n_prev, n_prev ? prev[0].x : 0.0f, n_prev ? prev[0].y : 0.0f, tc, ti[0], t[1], t[2], ti[8], ti[9], m[0], m[1], mb,
+           screen_w ? screen_w() : -1, screen_h ? screen_h() : -1);
 }
