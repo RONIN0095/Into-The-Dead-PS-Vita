@@ -58,7 +58,9 @@ void na_gl_log_memory(void); // na_gles3.c
 // 100 MB still free after loading, so 248 MB leaves ~44 MB of margin.
 // 72 MB less than the Ninja Arashi port: Unity 2020.3's allocator regions get
 // their memory outside the heap (reimpl/mem.c)
-int _newlib_heap_size_user = 80 * 1024 * 1024; // Unity used 36 MB of it; the rest of its memory is reservations
+// 56 MB: the intro scene left 43 MB of the 80 MB heap untouched while the
+// reservations' pool ran out; the pool got the difference (reimpl/mem.c)
+int _newlib_heap_size_user = 56 * 1024 * 1024; // Unity used 36 MB of it; the rest of its memory is reservations
 
 #ifdef USE_SCELIBC_IO
 int sceLibcHeapSize = 4 * 1024 * 1024;

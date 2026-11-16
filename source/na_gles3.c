@@ -954,12 +954,13 @@ static size_t gpu_free_bytes(void) {
     return vglMemFree(VGL_MEM_VRAM) + vglMemFree(VGL_MEM_RAM) + vglMemFree(VGL_MEM_SLOW);
 }
 
-// Halved: textures of 1024 or more on a side, and, once the GPU's memory
-// runs low, every texture of 256x256 or more
+// Halved: textures of 1024 or more on a side, and, once less than 48 MB of
+// the GPU's memory is left, every texture of 256x256 or more (with 24 MB,
+// the intro scene's 1900 textures still used it all up)
 static int want_half(int w, int h) {
     if (w < 16 || h < 16) return 0;
     if (w >= 1024 || h >= 1024) return 1;
-    return w >= 256 && h >= 256 && gpu_free_bytes() < 24u * 1024 * 1024;
+    return w >= 256 && h >= 256 && gpu_free_bytes() < 48u * 1024 * 1024;
 }
 
 // Set by convert_etc2 when the texture it wrapped has no alpha

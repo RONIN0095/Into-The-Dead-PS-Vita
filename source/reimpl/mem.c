@@ -92,7 +92,7 @@ static size_t madvise_calls = 0, madvise_bytes = 0, munmap_calls = 0, munmap_byt
 #define POOL_BLOCK (16u << 20)
 #define BLOCK_PAGES (POOL_BLOCK / MAP_PAGE)
 #define MAX_BLOCKS 16
-#define POOL_TARGET (160u << 20)
+#define POOL_TARGET (184u << 20) // 160 MB ran out in the intro scene; the heap gave 24 MB
 static SceUID pool_uids[MAX_BLOCKS];
 static int pool_blocks = 0, pool_state = 0; // 0 not tried, 1 ready, -1 none
 static size_t pool_pages = 0, pool_free = 0, pool_hint = 0;
