@@ -897,10 +897,12 @@ void na_sig_stats(int *sent, int *delivered) {
 
 static int sigsuspend_na(const sigset_bionic *mask) {
     uint32_t blocked = mask ? (uint32_t)*mask : 0;
+    na_thread_wait_begin("sigsuspend", NULL, 0);
     for (;;) {
         if (sig_pending_any && sig_deliver(blocked)) break;
         sceKernelDelayThread(200);
     }
+    na_thread_wait_end();
     errno = EINTR;
     return -1;
 }

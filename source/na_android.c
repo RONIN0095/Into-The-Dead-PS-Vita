@@ -258,10 +258,17 @@ static float stick_tilt(void) {
  * are in. While the stick (or D-pad) is pushed, it steers instead.
  */
 static int motion_reading(float *v) {
-    SceMotionState st;
+    // the raw sensor (sceMotionGetState gave only zeros here)
+    SceMotionSensorState st;
     memset(&st, 0, sizeof(st));
-    if (sceMotionGetState(&st) < 0) return 0;
-    float x = st.acceleration.x, y = st.acceleration.y, z = st.acceleration.z;
+    int r = sceMotionGetSensorState(&st, 1);
+    float x = st.accelerometer.x, y = st.accelerometer.y, z = st.accelerometer.z;
+    static int logged = 0;
+    if (logged < 3) {
+        logged++;
+        l_info("[sensor] sceMotionGetSensorState = 0x%08x: %.3f %.3f %.3f", r, x, y, z);
+    }
+    if (r < 0) return 0;
     if (x * x + y * y + z * z < 0.25f) return 0; // nothing (sampling off)
     static int n = 0;
     static float sign = 1.0f, sum = 0.0f;

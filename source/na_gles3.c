@@ -686,6 +686,73 @@ static GLint single_channel_ifmt(GLenum ifmt, GLenum unsized) {
     return ifmt == 0x8229 /* R8 */ ? GL_INTENSITY : (GLint)unsized;
 }
 
+/*
+ * Lower render resolution. In a run the GPU took ~80 ms a frame: Unity
+ * renders the 3D scene into its own screen-sized target (960x544 colour and
+ * depth) and then copies that to the screen. Targets of exactly that size
+ * are made at 75% (720x408) instead; while a framebuffer with such a target
+ * is bound, viewports and scissor boxes are scaled to match, and the copy
+ * to the screen samples the smaller texture with normalized coordinates as
+ * before, so it is stretched over the whole screen. 44% fewer pixels for
+ * the GPU to shade. The screen itself and Unity's own idea of the sizes
+ * stay at 960x544 (renderbuffer queries answer the asked size).
+ */
+#define RT_SCALE_NUM 3
+#define RT_SCALE_DEN 4
+static int rt_is_screen(GLsizei w, GLsizei h) { return w == 960 && h == 544; } // the screen
+static GLsizei rt_scale(GLsizei v) { return v * RT_SCALE_NUM / RT_SCALE_DEN; }
+
+#define MAX_SCALED 512
+static GLuint scaled_tex[MAX_SCALED];
+static void scaled_tex_set(GLuint tex, int on) {
+    int free_i = -1;
+    for (int i = 0; i < MAX_SCALED; i++) {
+        if (scaled_tex[i] == tex) {
+            if (!on) scaled_tex[i] = 0;
+            return;
+        }
+        if (!scaled_tex[i] && free_i < 0) free_i = i;
+    }
+    if (on && free_i >= 0) scaled_tex[free_i] = tex;
+}
+static int scaled_tex_has(GLuint tex) {
+    if (!tex) return 0;
+    for (int i = 0; i < MAX_SCALED; i++)
+        if (scaled_tex[i] == tex) return 1;
+    return 0;
+}
+
+#define MAX_FBS 1024
+static uint8_t fb_scaled[MAX_FBS]; // by framebuffer name (Unity's are small numbers)
+static GLuint cur_draw_fb_for_scale = 0;
+static int fb_is_scaled(GLuint fb) { return fb && fb < MAX_FBS && fb_scaled[fb]; }
+static void fb_set_scaled(GLuint fb, int on) {
+    if (fb && fb < MAX_FBS) {
+        if (fb_scaled[fb] != on) l_info("[GL] framebuffer %u renders at %d%%", fb, on ? 100 * RT_SCALE_NUM / RT_SCALE_DEN : 100);
+        fb_scaled[fb] = on;
+    }
+}
+
+static void glViewport_na(GLint x, GLint y, GLsizei w, GLsizei h) {
+    if (fb_is_scaled(cur_draw_fb_for_scale)) {
+        x = rt_scale(x);
+        y = rt_scale(y);
+        w = rt_scale(w);
+        h = rt_scale(h);
+    }
+    glViewport(x, y, w, h);
+}
+
+static void glScissor_na(GLint x, GLint y, GLsizei w, GLsizei h) {
+    if (fb_is_scaled(cur_draw_fb_for_scale)) {
+        x = rt_scale(x);
+        y = rt_scale(y);
+        w = rt_scale(w);
+        h = rt_scale(h);
+    }
+    glScissor(x, y, w, h);
+}
+
 static int tex_storage_logged = 0;
 static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
     GLuint tex = bound_texture(target);
@@ -704,6 +771,12 @@ static void glTexStorage2D_na(GLenum target, GLsizei levels, GLenum ifmt, GLsize
     if (!sized_to_unsized(ifmt, &format, &type)) {
         // Compressed: allocated on the first full-level glCompressedTexSubImage2D
         return;
+    }
+    scaled_tex_set(tex, 0);
+    if (target == GL_TEXTURE_2D && rt_is_screen(w, h)) {
+        scaled_tex_set(tex, 1);
+        w = rt_scale(w);
+        h = rt_scale(h);
     }
     int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
     for (int f = 0; f < faces; f++) {
@@ -1249,6 +1322,15 @@ static void glTexImage2D_na_inner(GLenum target, GLint level, GLint ifmt, GLsize
     if (ifmt == 0x8229 /* R8 */ || (ifmt == GL_RED && format == GL_RED)) ifmt = GL_INTENSITY; // see single_channel_ifmt
     glGetError();
     const void *px = unpack_ptr(data);
+    if (target == GL_TEXTURE_2D) {
+        GLuint bt = bound_texture(target);
+        scaled_tex_set(bt, 0);
+        if (!px && rt_is_screen(w, h)) { // a render target the size of the screen
+            scaled_tex_set(bt, 1);
+            w = rt_scale(w);
+            h = rt_scale(h);
+        }
+    }
     if (px && level == 0 && dxt_source_bpp(format, type) && (ifmt == (GLint)format || ifmt == 0x8058 || ifmt == 0x8051 ||
         ifmt == 0x8056 || ifmt == 0x8057 || ifmt == 0x8D62)) {
         tex_storage *s = storage_for(bound_texture(target), 1);
@@ -1500,6 +1582,10 @@ static void glRenderbufferStorage_na(GLenum target, GLenum ifmt, GLsizei w, GLsi
         r->w = w;
         r->h = h;
     }
+    if (rt_is_screen(w, h)) { // stored smaller (see "Lower render resolution"); queries answer w x h
+        w = rt_scale(w);
+        h = rt_scale(h);
+    }
     if (!is_color_format(ifmt) || !r) {
         glRenderbufferStorage(target, ifmt, w, h);
         return;
@@ -1529,6 +1615,7 @@ static void glFramebufferRenderbuffer_na(GLenum target, GLenum attachment, GLenu
     rb_info *r = rb_for(rb, 0);
     TRACE("glFramebufferRenderbuffer(0x%x, rb %u%s)", attachment, rb, r && r->tex ? " as texture" : "");
     if (r && r->tex) {
+        if (attachment == GL_COLOR_ATTACHMENT0) fb_set_scaled(cur_draw_fb_for_scale, rt_is_screen(r->w, r->h));
         glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, r->tex, 0);
         return;
     }
@@ -1574,6 +1661,7 @@ static void glFramebufferTexture2D_na(GLenum target, GLenum attachment, GLenum t
         if (warned++ < 8) l_warn("glFramebufferTexture2D: target 0x%x not supported", textarget);
         return;
     }
+    fb_set_scaled(cur_draw_fb_for_scale, scaled_tex_has(tex));
     glFramebufferTexture2D(target, attachment, textarget, tex, level);
     note_filled_id(tex);
 }
@@ -1594,6 +1682,13 @@ static void glBlitFramebuffer_na(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLi
     if (logged_blits++ < 8)
         l_info("[GL] glBlitFramebuffer(%d,%d-%d,%d -> %d,%d-%d,%d, mask 0x%x)", sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask);
     if (!(mask & GL_COLOR_BUFFER_BIT)) return; // depth/stencil blits: not supported by vitaGL
+    extern GLuint na_bound_read_fb(void);
+    if (fb_is_scaled(na_bound_read_fb())) {
+        sx0 = rt_scale(sx0), sy0 = rt_scale(sy0), sx1 = rt_scale(sx1), sy1 = rt_scale(sy1);
+    }
+    if (fb_is_scaled(cur_draw_fb_for_scale)) {
+        dx0 = rt_scale(dx0), dy0 = rt_scale(dy0), dx1 = rt_scale(dx1), dy1 = rt_scale(dy1);
+    }
     glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, filter);
 }
 
@@ -2469,7 +2564,7 @@ static const gl_entry gl_table[] = {
     E(glGetRenderbufferParameteriv), E(glBindRenderbuffer), E(glRenderbufferStorage),
     E(glFramebufferRenderbuffer), E(glDeleteRenderbuffers), E(glFramebufferTexture2D), E(glFramebufferTexture),
     { "glFramebufferTextureEXT", (void *)&glFramebufferTexture_na }, { "glFramebufferTextureOES", (void *)&glFramebufferTexture_na },
-    E(glCheckFramebufferStatus), E(glBlitFramebuffer),
+    E(glCheckFramebufferStatus), E(glBlitFramebuffer), E(glViewport), E(glScissor),
     E(glTexParameteri), E(glTexParameterf), E(glTexParameteriv), E(glSamplerParameteri), E(glSamplerParameterf),
     E(glTexImage2D), E(glTexSubImage2D), E(glCompressedTexImage2D), E(glGenerateMipmap),
     { "glGenerateMipmapOES", (void *)&glGenerateMipmap_na }, { "glGenerateMipmapEXT", (void *)&glGenerateMipmap_na },
@@ -2579,9 +2674,10 @@ void *na_gl_get_proc(const char *name) {
 GLuint na_first_color_target = 0;
 #define first_color_target na_first_color_target
 static GLuint bound_draw_fb = 0, bound_read_fb = 0;
+GLuint na_bound_read_fb(void) { return bound_read_fb; }
 
 static void glBindFramebuffer_na(GLenum target, GLuint fb) {
-    if (target == GL_FRAMEBUFFER || target == 0x8CA9) bound_draw_fb = fb; // DRAW_FRAMEBUFFER
+    if (target == GL_FRAMEBUFFER || target == 0x8CA9) bound_draw_fb = cur_draw_fb_for_scale = fb; // DRAW_FRAMEBUFFER
     if (target == GL_FRAMEBUFFER || target == 0x8CA8) bound_read_fb = fb; // READ_FRAMEBUFFER
     glBindFramebuffer(target, fb);
 }

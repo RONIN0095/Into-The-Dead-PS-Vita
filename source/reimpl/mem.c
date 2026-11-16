@@ -405,7 +405,13 @@ static void lock(void) {
         sceKernelCreateLwMutex(&map_lock, "mmap", 0, 0, NULL);
         map_lock_ready = 1;
     }
+    SceUInt quick = 2000; // usually free at once; only a long wait is noted
+    if (sceKernelLockLwMutex(&map_lock, 1, &quick) >= 0) return;
+    void na_thread_wait_begin(const char *what, const void *addr, int val);
+    void na_thread_wait_end(void);
+    na_thread_wait_begin("mmap lock", NULL, 0); // for the hang report
     sceKernelLockLwMutex(&map_lock, 1, NULL);
+    na_thread_wait_end();
 }
 
 static void unlock(void) {

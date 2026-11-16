@@ -112,6 +112,9 @@ static int watchdog_thread(SceSize args, void *argp) {
             na_trace_report();
             log_flush();
             log_sync();
+            na_threads_report(); // what each thread waits for (GC stops: "sigsuspend")
+            log_flush();
+            log_sync();
             log_last_activity_us = saved;
         }
         if (combo_s >= 3 || (last && now - last > 45ULL * 1000 * 1000)) {
