@@ -46,8 +46,11 @@
 
 #define MAX_POINTERS 10
 
+extern int na_pad_active; // na_pad.c
+
 typedef struct {
-    int id;
+    int id;   // the Vita's id for the finger (counts up with every touch)
+    int slot; // Android's pointer id: the lowest one free, 0 for a single finger
     float x, y;
 } touch_point;
 
@@ -78,7 +81,7 @@ static void send_motion(int action, int action_index, const touch_point *pts, in
     for (int i = 0; i < n && i < MAX_POINTERS; i++) {
         char k[16];
         snprintf(k, sizeof(k), "__id%d", i);
-        jo_set_int(ev, k, pts[i].id);
+        jo_set_int(ev, k, pts[i].slot);
         snprintf(k, sizeof(k), "__x%d", i);
         jo_set_float(ev, k, pts[i].x);
         snprintf(k, sizeof(k), "__y%d", i);
@@ -233,7 +236,8 @@ static void poll_touch(void) {
             now[n_now].y = SCREEN_H / 2 - (261.5f / 2 - 16.3f) * 1.2f;
             n_now++;
         }
-    } else {
+    } else if (!na_pad_active) {
+        // (only when the game's controller support could not be hooked, na_pad.c)
         menu_cursor(b, td.reportNum > 0);
         if ((b & SCE_CTRL_CROSS) && n_now < MAX_POINTERS) {
             now[n_now].id = 200; // the cursor's finger
@@ -267,6 +271,19 @@ static void poll_touch(void) {
         for (int p = 0; p < n_cur; p++)
             if (cur[p].id == now[i].id) known = 1;
         if (known || n_cur >= MAX_POINTERS) continue;
+        /*
+         * Android numbers pointers from 0, reusing the lowest free number;
+         * the Vita counts its touches up to 127. Unity takes pointer ids as
+         * they come, and with Input.multiTouchEnabled off (this game's
+         * menus) it drops every touch whose id is not 0: taps did nothing.
+         */
+        int slot = 0;
+        for (int p = 0; p < n_cur; p++)
+            if (cur[p].slot == slot) {
+                slot++;
+                p = -1;
+            }
+        now[i].slot = slot;
         cur[n_cur++] = now[i];
         if (n_cur == 1) down_time = now_ms();
         send_motion(n_cur == 1 ? ACTION_DOWN : ACTION_POINTER_DOWN, n_cur - 1, cur, n_cur);
@@ -277,7 +294,8 @@ static void poll_touch(void) {
     for (int p = 0; p < n_cur; p++)
         for (int i = 0; i < n_now; i++)
             if (cur[p].id == now[i].id && (cur[p].x != now[i].x || cur[p].y != now[i].y)) {
-                cur[p] = now[i];
+                cur[p].x = now[i].x;
+                cur[p].y = now[i].y;
                 moved = 1;
             }
     if (moved) send_motion(ACTION_MOVE, 0, cur, n_cur);
@@ -326,6 +344,9 @@ static void send_key(int action, int keycode) {
 }
 
 static void poll_buttons(void) {
+    // The buttons go to the game's own controller support (na_pad.c); key
+    // events are sent only without it
+    if (na_pad_active) return;
     SceCtrlData pad;
     memset(&pad, 0, sizeof(pad));
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) return;
@@ -443,7 +464,7 @@ void na_input_probe(void) {
     static int (*mouse_button)(int);
     static int (*screen_w)(void), (*screen_h)(void);
     static int looked = 0, logged = 0, after = 0;
-    if (logged >= 150) return;
+    if (logged >= 40) return;
     if (!looked) {
         looked = 1;
         void *(*resolve)(const char *) = (void *)na_module_symbol(NA_LIB_IL2CPP, "il2cpp_resolve_icall");

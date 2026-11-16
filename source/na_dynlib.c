@@ -705,6 +705,9 @@ static volatile int faults_wanted = 0;
 static void abort_handler(KuKernelAbortContext *ctx) {
     // a reserved page touched for the first time: it gets memory, and the
     // instruction runs again (reimpl/mem.c)
+    extern volatile int na_exiting; // reimpl/mem.c: the reservations are being freed
+    if (na_exiting)
+        for (;;) sceKernelDelayThread(1000000); // the process ends in a moment: wait for it here
     if (faults_wanted && na_mmap_fault(ctx->FAR)) return;
     int sig = BIONIC_SIGSEGV;
     void *h = sig_actions[sig].handler;

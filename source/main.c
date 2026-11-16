@@ -78,6 +78,20 @@ extern volatile uint64_t log_last_activity_us;
 static volatile uint64_t last_frame_us = 0;
 static SceUID main_tid = -1;
 
+/*
+ * The way out: the memory reservations are given back before the process
+ * ends (reimpl/mem.c, na_mmap_teardown). Closing the game from the LiveArea
+ * ends it without this.
+ */
+static void clean_exit(const char *why) {
+    void na_mmap_teardown(void);
+    l_info("Leaving (%s).", why);
+    log_flush();
+    log_sync();
+    na_mmap_teardown();
+    sceKernelExitProcess(0);
+}
+
 static int watchdog_thread(SceSize args, void *argp) {
     while (1) {
         sceKernelDelayThread(1000 * 1000);
@@ -195,6 +209,17 @@ int main() {
     int frame = 0;
     while (1) {
         na_main_phase = 2;
+        {
+            // START + SELECT held for a second: leave (in order, see clean_exit)
+            static uint64_t held_since = 0;
+            SceCtrlData pad;
+            memset(&pad, 0, sizeof(pad));
+            sceCtrlPeekBufferPositive(0, &pad, 1);
+            int both = (pad.buttons & (SCE_CTRL_START | SCE_CTRL_SELECT)) == (SCE_CTRL_START | SCE_CTRL_SELECT);
+            if (!both) held_since = 0;
+            else if (!held_since) held_since = sceKernelGetProcessTimeWide();
+            else if (sceKernelGetProcessTimeWide() - held_since > 1000000ULL) clean_exit("START + SELECT");
+        }
         { void na_sig_poll(void); na_sig_poll(); } // signals for the main thread (GC stops)
         na_input_poll();
         na_main_phase = 3;
@@ -217,9 +242,7 @@ int main() {
         if (r) quit_since = 0;
         else if (!quit_since) quit_since = sceKernelGetProcessTimeWide();
         else if (sceKernelGetProcessTimeWide() - quit_since > 3000000ULL) {
-            l_info("Unity has quit (nativeRender false for 3 s): exiting.");
-            log_flush();
-            sceKernelExitProcess(0);
+            clean_exit("Unity has quit: nativeRender false for 3 s");
         }
 #ifndef NA_RELEASE
         if (frame < 5 || frame % 600 == 0)

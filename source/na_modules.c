@@ -124,6 +124,10 @@ void na_modules_load(void) {
         so_relocate(&lib->mod);
         resolve_imports(&lib->mod);
         if (i == NA_LIB_IL2CPP) hook_got(lib, "__cxa_throw", (void *)&na_cxa_throw_hook, (void **)&na_orig_cxa_throw);
+        if (i == NA_LIB_IL2CPP) {
+            void na_pad_install(void); // na_pad.c: the game's controller support, driven by the Vita's pad
+            na_pad_install();
+        }
         so_flush_caches(&lib->mod);
         l_info("%s relocated and linked.", lib->soname);
     }

@@ -124,11 +124,13 @@ void na_mmap_pool_init(void) {
 static int pool_cdram_blocks = 0;
 static size_t pool_reserved_pages = 0; // pool pages used for the tests
 
+static SceUID trial_uid = -1;
 static int cdram_block_works(SceUID uid, int index) {
     static void *trial = NULL;
     static int trial_n = 0;
     if (!trial) {
         SceUID r = kuKernelMemReserve(&trial, 1024 * 1024, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
+        trial_uid = r;
         if (r < 0 || !trial) {
             l_warn("mmap: no test reservation for CDRAM pool blocks (0x%08x)", (unsigned)r);
             trial = NULL;
@@ -355,7 +357,10 @@ static void set_access(mapping *m, uintptr_t start, uintptr_t end, int on) {
 // makes page objects in the kernel, and how many it has is unknown.)
 #define FAULT_CHUNK (32 * 1024)
 static int faults = 0;
+volatile int na_exiting = 0; // set by na_mmap_teardown: no more memory for anyone
+
 int na_mmap_fault(uint32_t addr) {
+    if (na_exiting) return 0;
     lock();
     mapping *m = find_mapping(addr);
     int ok = 0;
@@ -915,4 +920,50 @@ void na_mmap_report2(size_t *pool_total_kb, size_t *pool_free_kb, size_t *idle_k
     stats[2] = munmap_calls;
     stats[3] = munmap_bytes / 1024;
     stats[4] = plain_mmap_bytes / 1024;
+}
+
+/*
+ * Leaving in order. The pages of the reservations are mapped from the pool's
+ * blocks (kubridge "commit with a base block"); the kernel does not know that
+ * a reservation depends on a pool block. When the process is simply ended,
+ * everything is torn down in the kernel's own order, and the console was
+ * left unstable afterwards (frozen LiveArea, apps not starting). Here the
+ * reservations are freed first, while the blocks behind their pages still
+ * exist, then the pool, and only then does the process end (main.c).
+ *
+ * Other threads may still run: from now on a first touch gets no memory
+ * (na_mmap_fault) and the fault handler parks the thread (na_dynlib.c). The
+ * lock is taken and kept, so a commit under way finishes first.
+ */
+void log_flush(void);
+void log_sync(void);
+void na_mmap_teardown(void) {
+    na_exiting = 1;
+    lock();
+    int n = 0, failed = 0;
+    l_info("mmap: leaving: freeing the reservations (%u KB reserved, %u KB with memory)",
+           (unsigned)(reserved_bytes / 1024), (unsigned)(committed_bytes / 1024));
+    log_flush();
+    log_sync();
+    for (int i = 0; i < MAX_MAPPINGS; i++) {
+        mapping *m = &mappings[i];
+        if (!m->base || m->uid <= 0 || m->parent) continue;
+        int r = sceKernelFreeMemBlock(m->uid);
+        if (r < 0) failed++;
+        n++;
+        m->uid = 0;
+    }
+    if (trial_uid > 0) {
+        if (sceKernelFreeMemBlock(trial_uid) < 0) failed++;
+        n++;
+    }
+    l_info("mmap: leaving: %d reservations freed (%d refused); freeing the pool's %d blocks", n, failed, pool_blocks);
+    log_flush();
+    log_sync();
+    failed = 0;
+    for (int i = 0; i < pool_blocks; i++)
+        if (sceKernelFreeMemBlock(pool_uids[i]) < 0) failed++;
+    l_info("mmap: leaving: pool freed (%d refused)", failed);
+    log_flush();
+    log_sync();
 }

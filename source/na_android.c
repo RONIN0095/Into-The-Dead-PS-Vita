@@ -285,6 +285,28 @@ static int motion_reading(float *v) {
     return 1;
 }
 
+/*
+ * The sideways part of gravity in g, for the pad code's tilt steering
+ * (na_pad.c): positive with the console's right side down, as Unity's
+ * Input.acceleration.x is on a phone. The raw reading points the way
+ * gravity pulls (lying flat, screen up: z = -1), which is Unity's
+ * convention already.
+ */
+int na_motion_gravity_x(float *out) {
+    static int started = 0;
+    if (!started) {
+        started = 1;
+        sceMotionStartSampling();
+    }
+    SceMotionSensorState st;
+    memset(&st, 0, sizeof(st));
+    if (sceMotionGetSensorState(&st, 1) < 0) return 0;
+    float x = st.accelerometer.x, y = st.accelerometer.y, z = st.accelerometer.z;
+    if (x * x + y * y + z * z < 0.25f) return 0; // no reading
+    *out = x;
+    return 1;
+}
+
 int ASensorEventQueue_getEvents_na(void *q, void *events, int count) {
     if (!sensor_queue.enabled || count < 1 || !events || !sensor_due()) return 0;
     uint64_t now = sceKernelGetProcessTimeWide();

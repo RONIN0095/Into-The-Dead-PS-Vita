@@ -120,6 +120,7 @@ set(SOURCES
     source/na_egl.c
     source/na_gles3.c
     source/na_input.c
+    source/na_pad.c
     source/na_java.c
     source/na_looper.c
     source/na_threads.c
