@@ -1191,13 +1191,18 @@ static long futex_na(volatile int *addr, int op, int val, const struct timespec 
     // pthread_cond_timedwait measures against.
     na_thread_wait_begin(timeout ? "futex(t)" : "futex", (const void *)addr, val);
     int timed_out = 0;
+    uint64_t slice_us = 4000;
     while (1) {
         uint64_t now_us = sceKernelGetProcessTimeWide();
         if (deadline && now_us >= deadline) {
             timed_out = 1;
             break;
         }
-        uint64_t slice = 4000;
+        // 4 ms at first, then longer and longer (up to 128 ms): some twenty
+        // idle worker threads each woke 250 times a second here and together
+        // took most of a core while the game loaded
+        uint64_t slice = slice_us;
+        if (slice_us < 128000) slice_us *= 2;
         if (deadline && deadline - now_us < slice) slice = deadline - now_us;
         struct timespec abs;
         clock_gettime(CLOCK_REALTIME, &abs);

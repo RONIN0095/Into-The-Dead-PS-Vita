@@ -275,6 +275,10 @@ static GLuint glCreateShader_na(GLenum type) {
 }
 
 static int shaders_seen = 0;
+static char *frag_source[MAX_SHADER_IDS];   // by shader id (debug builds)
+#define MAX_PROG_SRC 256
+static char *prog_frag_src[MAX_PROG_SRC];    // by program id: a copy (shader ids are reused)
+static uint8_t prog_src_logged[MAX_PROG_SRC];
 
 static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) {
     // Join the parts
@@ -314,6 +318,13 @@ static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const 
     const GLchar *s = t ? t : src;
     GLint len = (GLint)strlen(s);
     glShaderSource(shader, 1, &s, &len);
+#ifndef NA_RELEASE
+    // fragment sources are kept: a traced frame logs those of the programs it drew with
+    if (frag && shader < MAX_SHADER_IDS) {
+        free(frag_source[shader]);
+        frag_source[shader] = strdup(src);
+    }
+#endif
     free(t);
     free(src);
 }
@@ -1926,6 +1937,11 @@ static void glUseProgram_na(GLuint p) {
 
 static void glAttachShader_na(GLuint p, GLuint sh) {
     PROG_EVENT("glAttachShader(%u, %u)", p, sh);
+    if (p < MAX_PROG_SRC && sh < MAX_SHADER_IDS && shader_is_fragment[sh]) {
+        free(prog_frag_src[p]);
+        prog_frag_src[p] = frag_source[sh] ? strdup(frag_source[sh]) : NULL;
+        prog_src_logged[p] = 0;
+    }
     glAttachShader(p, sh);
 }
 
@@ -2220,6 +2236,20 @@ static int trace_this_draw(void) {
 
 static void traced(const char *what, const char *desc) {
     draws_traced++;
+    // the fragment shader of each program drawn with, once
+    if (cur_program < MAX_PROG_SRC && !prog_src_logged[cur_program]) {
+        prog_src_logged[cur_program] = 1;
+        const char *fs = prog_frag_src[cur_program];
+        if (fs) {
+            l_info("[GL] fragment shader of program %u:", cur_program);
+            while (*fs) {
+                const char *nl = strchr(fs, '\n');
+                int n = nl ? (int)(nl - fs) : (int)strlen(fs);
+                if (n > 0) l_info("[FS%u] %.*s", cur_program, n > 230 ? 230 : n, fs);
+                fs += n + (nl ? 1 : 0);
+            }
+        }
+    }
     // colour of the first vertex (attribute 1 is COLOR0 in Unity's bindings)
     char col[48] = "no color";
     if (cur_vao->vertex_attrib_state & 2) {
