@@ -89,7 +89,10 @@ static void clean_exit(const char *why) {
     l_info("Leaving (%s).", why);
     log_flush();
     log_sync();
-    na_mmap_teardown();
+    na_mmap_teardown(); // logs each step (synced), to see where it stops if it does
+    l_info("Leaving: process ends.");
+    log_flush();
+    log_sync();
     sceKernelExitProcess(0);
 }
 
@@ -221,6 +224,13 @@ int main() {
             if (!both) held_since = 0;
             else if (!held_since) held_since = sceKernelGetProcessTimeWide();
             else if (sceKernelGetProcessTimeWide() - held_since > 1000000ULL) clean_exit("START + SELECT");
+            static int combo_logged = 0;
+            if (both && !combo_logged) {
+                combo_logged = 1;
+                l_info("START + SELECT pressed: leaving after 1 s");
+                log_flush();
+                log_sync();
+            }
         }
         { void na_sig_poll(void); na_sig_poll(); } // signals for the main thread (GC stops)
         na_input_poll();

@@ -37,6 +37,7 @@
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 
+#include "reimpl/mem.h"
 #include "utils/logger.h"
 
 #define BLOCK (64 * 1024)
@@ -62,21 +63,17 @@ static uint32_t st_reads, st_hits, st_misses, st_direct_kb, st_io_us;
 static void cache_init(void) {
     if (ready) return;
     sceKernelCreateLwMutex(&lock_work, "apkcache", 0, 0, NULL);
-    // As big as memory allows: 12 MB, else less
-    static const int sizes_mb[] = { 12, 8, 4, 2 };
-    for (unsigned i = 0; i < sizeof(sizes_mb) / sizeof(sizes_mb[0]) && !cache_mem; i++) {
-        size_t sz = (size_t)sizes_mb[i] << 20;
-        SceUID b = sceKernelAllocMemBlock("apkcache", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, sz, NULL);
-        if (b >= 0) {
-            void *p = NULL;
-            sceKernelGetMemBlockBase(b, &p);
-            cache_mem = p;
-            n_slots = (int)(sz / BLOCK);
-        }
-    }
-    if (!cache_mem) {
-        cache_mem = memalign(64, 1 << 20);
-        n_slots = cache_mem ? (1 << 20) / BLOCK : 0;
+    /*
+     * 3 MB from the mmap arena (the reservations' pool, reimpl/mem.c). A
+     * memory block of its own (8 MB) took the memory the kernel needed for
+     * Unity's next thread: pthread_create failed and the game hung black.
+     */
+    size_t sz = 3u << 20;
+    void *p = mmap(NULL, sz, 3 /* PROT_READ | PROT_WRITE */, 0x22 /* bionic MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
+    if (p && p != (void *)-1) {
+        memset(p, 0, sz); // its pages get memory now (reads from the card can't fault them in)
+        cache_mem = p;
+        n_slots = (int)(sz / BLOCK);
     }
     slots = calloc(n_slots ? n_slots : 1, sizeof(slot));
     for (int i = 0; i < n_slots; i++) slots[i].block = -1;
