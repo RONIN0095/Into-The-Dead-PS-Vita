@@ -728,7 +728,14 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 return lent;
             }
         }
-        if (slot >= 0 && prot == 0 && fd < 0 && len >= RESERVE_MIN) {
+        /*
+         * Big readable/writable anonymous maps (Unity grows a 9 MB buffer in
+         * a run, 90 KB at a time) used to come from the heap, which had no
+         * 9 MB in one piece left: the game stopped. They are reservations
+         * now too, every page accessible, getting pool memory on first touch.
+         */
+        int big_rw = prot != 0 && fd < 0 && len >= RESERVE_MIN * 4;
+        if (slot >= 0 && (prot == 0 || big_rw) && fd < 0 && len >= RESERVE_MIN) {
             // address space only
             uint8_t *commit = calloc(1, (len / MAP_PAGE + 7) / 8);
             uint32_t *pidx = calloc(len / MAP_PAGE, sizeof(uint32_t));
@@ -747,6 +754,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offs) {
                 mappings[slot].access = acc;
                 mappings[slot].dead = 0;
                 reserved_bytes += len;
+                if (big_rw) memset(acc, 0xff, (len / MAP_PAGE + 7) / 8); // all accessible: memory on first touch
                 void na_faults_enable(void); // na_dynlib.c
                 na_faults_enable();
                 unlock();
