@@ -64,11 +64,11 @@ static void cache_init(void) {
     if (ready) return;
     sceKernelCreateLwMutex(&lock_work, "apkcache", 0, 0, NULL);
     /*
-     * 3 MB from the mmap arena (the reservations' pool, reimpl/mem.c). A
+     * 6 MB from the reservations' pool (reimpl/mem.c). A
      * memory block of its own (8 MB) took the memory the kernel needed for
      * Unity's next thread: pthread_create failed and the game hung black.
      */
-    size_t sz = 3u << 20;
+    size_t sz = 6u << 20; // (3 MB: of each load's ~1000 blocks about 950 still came from the card)
     void *p = mmap(NULL, sz, 3 /* PROT_READ | PROT_WRITE */, 0x22 /* bionic MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
     if (p && p != (void *)-1) {
         memset(p, 0, sz); // its pages get memory now (reads from the card can't fault them in)

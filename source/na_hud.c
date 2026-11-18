@@ -121,6 +121,12 @@ static void quality_tick(void) {
         set_aniso = resolve("UnityEngine.QualitySettings::set_anisotropicFiltering(UnityEngine.AnisotropicFiltering)");
         set_shadows = resolve("UnityEngine.QualitySettings::set_shadows(UnityEngine.ShadowQuality)");
         set_soft = resolve("UnityEngine.QualitySettings::set_softParticles(System.Boolean)");
+        // Loading in the background as fast as it goes (High: the loading
+        // thread runs at a high priority and the main thread integrates up
+        // to 50 ms of loaded data a frame instead of 10)
+        void (*set_load_prio)(int) = resolve("UnityEngine.Application::set_backgroundLoadingPriority(UnityEngine.ThreadPriority)");
+        if (set_load_prio) set_load_prio(4 /* ThreadPriority.High */);
+        l_info("[HUD] backgroundLoadingPriority: %s", set_load_prio ? "High" : "not found");
         l_info("[HUD] quality icalls: texture limit %p/%p, anti-aliasing %p, anisotropic %p, shadows %p, soft particles %p",
                get_tex, set_tex, set_aa, set_aniso, set_shadows, set_soft);
     }
