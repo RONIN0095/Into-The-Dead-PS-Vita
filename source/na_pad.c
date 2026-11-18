@@ -283,7 +283,7 @@ static void pad_update(void *self, void *method) {
     {
         extern volatile int na_trace_request;
         static int run_frames = 0, traced = 0;
-        if (mode == 2 && !traced && ++run_frames == 600) {
+        if (0 && mode == 2 && !traced && ++run_frames == 600) { // off: it stopped the run for 10 s
             traced = 1;
             na_trace_request = 1;
             l_info("[pad] tracing one frame of the run");

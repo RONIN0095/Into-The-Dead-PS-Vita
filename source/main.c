@@ -106,6 +106,7 @@ static int watchdog_thread(SceSize args, void *argp) {
         if (++ticks % 10 == 0) { // every 10 s, also while stuck (doesn't count as progress)
             uint64_t saved = log_last_activity_us;
             na_gl_log_memory();
+            { void na_apkcache_report(void); na_apkcache_report(); }
             log_last_activity_us = saved;
         }
         // L + R + SELECT held for 3 s: a core dump on request (shows where every thread is)
@@ -291,6 +292,7 @@ int main() {
         uint32_t ft = last_frame_us ? (uint32_t)((now_us - last_frame_us) / 1000) : 0;
         if ((ft > 1000 && frame > 4) || (ft > 40 && frame > 300 && hitches < 400)) { // loads always, slow frames up to 400
             hitches++;
+            { void na_apkcache_report(void); na_apkcache_report(); }
             l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms [checks %u us, %u vertex programs %u us, "
                    "%u fragment programs %u us], textures %u in %u ms, shaders %u in %u ms, "
                    "reads %u KB in %u ms, swap %u ms, fence waits %u ms)", frame, ft, unity_us / 1000, na_stats.draw_n,

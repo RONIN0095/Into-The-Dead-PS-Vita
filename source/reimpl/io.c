@@ -91,11 +91,19 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
         return fopen_soloader("app0:/meminfo", mode);
     }
 
+    // base.apk through a block cache (na_apkcache.c)
+    FILE *na_apkcache_open(const char *path);
+    size_t flen = strlen(filename);
+    FILE *ret = NULL;
+    if (flen >= 8 && strcmp(filename + flen - 8, "base.apk") == 0 && mode[0] == 'r' && !strchr(mode, '+'))
+        ret = na_apkcache_open(filename);
+    if (!ret) {
 #ifdef USE_SCELIBC_IO
-    FILE* ret = sceLibcBridge_fopen(filename, mode);
+        ret = sceLibcBridge_fopen(filename, mode);
 #else
-    FILE* ret = fopen(filename, mode);
+        ret = fopen(filename, mode);
 #endif
+    }
 
     if (ret) {
         if (strncmp(filename, "app0:/cpu", 9) != 0) l_io("fopen(%s, %s): %p", filename, mode, ret);
