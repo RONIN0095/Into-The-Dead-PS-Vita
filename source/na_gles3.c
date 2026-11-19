@@ -2141,6 +2141,7 @@ volatile int na_prof_request = 0;
 #define PROF_SETTLE 2    // frames at the start of a block that are not counted
 #define PROF_PROGS 24
 extern volatile int na_pad_mode; // na_pad.c: 2 in a run
+extern volatile uint32_t na_gxm_begin_us, na_gxm_end_us, na_gxm_draw_us, na_gxm_unif_us;
 volatile int na_prof_finish = 0;
 volatile uint32_t na_prof_finish_us = 0;
 static int prof_state = -1; // -1 off, -2 CPU/GPU split, 0 collecting the programs, 1.. program steps
