@@ -84,6 +84,14 @@ static SceUID main_tid = -1;
  * ends (reimpl/mem.c, na_mmap_teardown). Closing the game from the LiveArea
  * ends it without this.
  */
+// Time spent in each main loop phase since the last hitch line (which says
+// where a slow frame outside Unity's own frame went)
+static uint32_t phase_us[9];
+static uint64_t phase_t0;
+#define NA_PHASE(n) do { uint64_t _t = sceKernelGetProcessTimeWide(); \
+    if (phase_t0 && na_main_phase >= 0 && na_main_phase < 9) phase_us[na_main_phase] += (uint32_t)(_t - phase_t0); \
+    phase_t0 = _t; na_main_phase = (n); } while (0)
+
 static void clean_exit(const char *why) {
     void na_mmap_teardown(void);
     l_info("Leaving (%s).", why);
@@ -208,12 +216,12 @@ int main() {
 #ifndef NA_RELEASE
     na_trace_start(); // records the main thread's calls into the loader (hang reports)
 #endif
-    na_main_phase = 1;
+    NA_PHASE(1);
     na_unity_start();
 
     int frame = 0;
     while (1) {
-        na_main_phase = 2;
+        NA_PHASE(2);
         {
             // START + SELECT held for a second: leave (in order, see clean_exit)
             static uint64_t held_since = 0;
@@ -234,12 +242,12 @@ int main() {
         }
         { void na_sig_poll(void); na_sig_poll(); } // signals for the main thread (GC stops)
         na_input_poll();
-        na_main_phase = 3;
+        NA_PHASE(3);
         na_looper_tick_main();
-        na_main_phase = 4;
+        NA_PHASE(4);
         na_java_tick();
         int swaps_before = na_egl_swap_count;
-        na_main_phase = 5;
+        NA_PHASE(5);
         uint64_t unity_t0 = sceKernelGetProcessTimeWide();
         int r = na_unity_frame();
         uint32_t unity_us = (uint32_t)(sceKernelGetProcessTimeWide() - unity_t0);
@@ -285,14 +293,14 @@ int main() {
             if (heap_size) na_gc_heap_kb = (unsigned)(heap_size() / 1024);
             if (used_size) na_gc_used_kb = (unsigned)(used_size() / 1024);
         }
-        na_main_phase = 6;
+        NA_PHASE(6);
         na_filecache_tick(frame);
         // Unity skips the swap while it has nothing to show: keep the display alive
         if (na_egl_swap_count == swaps_before)
             sceKernelDelayThread(1000);
         if (frame == 0)
             sceIoRemove(DATA_PATH "sound_probe.txt"); // sound setup went fine (see dynlib.c)
-        na_main_phase = 7;
+        NA_PHASE(7);
         na_hud_tick(frame);
         frame++;
 #ifndef NA_RELEASE
@@ -303,6 +311,16 @@ int main() {
         if ((ft > 1000 && frame > 4) || (ft > 40 && frame > 300 && hitches < 400)) { // loads always, slow frames up to 400
             hitches++;
             { void na_apkcache_report(void); na_apkcache_report(); }
+            {
+                extern volatile uint32_t na_tc_open_us, na_tc_read_us, na_tc_unzip_us, na_tc_n;
+                if (na_tc_n)
+                    l_info("[HITCH] texture cache: %u files, open %u ms, read %u ms, unpack %u ms", na_tc_n,
+                           na_tc_open_us / 1000, na_tc_read_us / 1000, na_tc_unzip_us / 1000);
+                na_tc_n = na_tc_open_us = na_tc_read_us = na_tc_unzip_us = 0;
+            }
+            l_info("[HITCH] phases (ms): input %u, looper %u, java %u, unity %u, cache %u, hud %u, rest %u",
+                   phase_us[2] / 1000, phase_us[3] / 1000, phase_us[4] / 1000, phase_us[5] / 1000, phase_us[6] / 1000,
+                   phase_us[7] / 1000, (phase_us[0] + phase_us[1] + phase_us[8]) / 1000);
             l_info("[HITCH] frame %d: %u ms (Unity frame %u ms, draws %u in %u ms [checks %u us, %u vertex programs %u us, "
                    "%u fragment programs %u us], textures %u in %u ms, shaders %u in %u ms, "
                    "reads %u KB in %u ms, swap %u ms, fence waits %u ms)", frame, ft, unity_us / 1000, na_stats.draw_n,
@@ -314,6 +332,7 @@ int main() {
         last_frame_us = now_us;
 #endif
         memset((void *)&na_stats, 0, sizeof(na_stats));
+        memset(phase_us, 0, sizeof(phase_us));
     }
 
     sceKernelExitDeleteThread(0);

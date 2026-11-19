@@ -29,6 +29,7 @@
 
 #include <vitaGL.h>
 #include <psp2/gxm.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/kernel/processmgr.h>
 
 #include "na_shaders.h"
@@ -1086,20 +1087,29 @@ static int want_half(int w, int h) {
 static int etc_opaque = 0;
 
 // Reads a zlib-compressed cache file of exactly `size` bytes
+// Time the texture cache spends opening, reading and unpacking (hitch line)
+volatile uint32_t na_tc_open_us, na_tc_read_us, na_tc_unzip_us, na_tc_n;
+
 static int cache_read(const char *path, uint8_t *dst, size_t size) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    fseek(f, 0, SEEK_END);
-    long zn = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    // sceIo directly: newlib's fopen/fseek/ftell/fread took several calls more
+    uint64_t t0 = sceKernelGetProcessTimeWide();
+    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+    uint64_t t1 = sceKernelGetProcessTimeWide();
+    na_tc_open_us += (uint32_t)(t1 - t0);
+    if (fd < 0) return 0;
+    long zn = (long)sceIoLseek(fd, 0, SCE_SEEK_END);
     uint8_t *z = zn > 0 ? malloc(zn) : NULL;
     int ok = 0;
-    if (z && fread(z, 1, zn, f) == (size_t)zn) {
+    if (z && sceIoPread(fd, z, zn, 0) == zn) {
+        uint64_t t2 = sceKernelGetProcessTimeWide();
+        na_tc_read_us += (uint32_t)(t2 - t1);
         uLongf out = size;
         ok = uncompress(dst, &out, z, zn) == Z_OK && out == size;
+        na_tc_unzip_us += (uint32_t)(sceKernelGetProcessTimeWide() - t2);
     }
+    na_tc_n++;
     free(z);
-    fclose(f);
+    sceIoClose(fd);
     return ok;
 }
 
