@@ -1,0 +1,25 @@
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -477,6 +477,9 @@
+ 	}
+ }
+ 
++// Port: depth/stencil loaded from and stored to memory in every scene (the
++// loader turns it off unless asked: it costs GPU bandwidth in every pass)
++int vgl_store_depth_stencil = 1;
+ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {
+ 	// Calculating sizes for depth and stencil surfaces
+ 	unsigned int depth_stencil_width = VGL_ALIGN(w, SCE_GXM_TILE_SIZEX);
+@@ -515,8 +518,10 @@
+ #endif
+ 
+ #ifdef STORE_DEPTH_STENCIL
+-	sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+-	sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
++	if (vgl_store_depth_stencil) {
++		sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
++		sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
++	}
+ #endif
+ }
+ 

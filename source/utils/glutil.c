@@ -13,6 +13,7 @@
 #include "utils/logger.h"
 
 void na_gles3_init(void);
+extern int vgl_store_depth_stencil; // vitaGL (extras/patches/vitagl-zzzzzz-depth-store-switch.patch)
 
 void gl_preload() {
     if (!file_exists("ur0:/data/libshacccg.suprx")
@@ -30,6 +31,11 @@ void gl_init() {
     // the GPU's memory). Unity draws from its own buffers; the pool is for
     // the copies texture uploads make, at most 4 MB at a time.
     vglSetCircularPoolSize(16 * 1024 * 1024);
+    // Depth/stencil stay on chip: loading and storing them in every scene
+    // (taken over from the Ninja Arashi port) cost GPU bandwidth in every
+    // pass. ux0:data/intothedead/depth_store.txt turns it back on.
+    vgl_store_depth_stencil = file_exists("ux0:data/intothedead/depth_store.txt");
+    l_info("Depth/stencil %s memory in every scene", vgl_store_depth_stencil ? "kept in" : "not kept in");
     vglInitExtended(0, 960, 544, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
     na_gles3_init();
 }

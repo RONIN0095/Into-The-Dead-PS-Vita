@@ -282,13 +282,39 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         extern volatile int na_pad_mode; // na_pad.c: 2 in a run
         static uint64_t last_swap = 0;
         uint64_t now = sceKernelGetProcessTimeWide();
+        uint32_t work = last_swap ? (uint32_t)(now - last_swap) : 0;
         if (na_pad_mode == 2 && last_swap && now - last_swap < 31000)
             sceKernelDelayThread((SceUInt)(31000 - (now - last_swap)));
-        last_swap = sceKernelGetProcessTimeWide();
+        uint64_t t0 = sceKernelGetProcessTimeWide();
+        vglSwapBuffers(GL_FALSE);
+        uint64_t t1 = sceKernelGetProcessTimeWide();
+        na_stats.swap_us += (uint32_t)(t1 - t0);
+        /*
+         * Run statistics every 300 frames of a run: the time a frame took,
+         * how much of it the game and the draws needed (work), and how long
+         * the swap waited for the GPU and the refresh. Work well under 31 ms
+         * and short swaps leave room for a sharper picture.
+         */
+        static uint32_t rs_n, rs_slow, rs_work, rs_swap, rs_max;
+        static uint64_t rs_t0;
+        if (na_pad_mode == 2 && last_swap) {
+            uint32_t ft = (uint32_t)(t1 - last_swap);
+            if (!rs_n) rs_t0 = last_swap;
+            rs_n++;
+            rs_work += work;
+            rs_swap += (uint32_t)(t1 - t0);
+            if (ft > 40000) rs_slow++;
+            if (ft > rs_max) rs_max = ft;
+            if (rs_n == 300) {
+                l_info("[RUN] 300 frames: %.1f fps, work %.1f ms, swap wait %.1f ms a frame, %u frames over 40 ms (longest %u ms)",
+                       300e6f / (float)(t1 - rs_t0), rs_work / 300000.0f, rs_swap / 300000.0f, rs_slow, rs_max / 1000);
+                rs_n = rs_slow = rs_work = rs_swap = rs_max = 0;
+            }
+        } else {
+            rs_n = rs_slow = rs_work = rs_swap = rs_max = 0;
+        }
+        last_swap = t1;
     }
-    uint64_t t0 = sceKernelGetProcessTimeWide();
-    vglSwapBuffers(GL_FALSE);
-    na_stats.swap_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     {
         // profiler (na_gles3.c): how long the GPU still works on the frame
         extern volatile int na_prof_finish;
