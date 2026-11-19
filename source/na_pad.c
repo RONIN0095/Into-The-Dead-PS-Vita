@@ -88,6 +88,7 @@ typedef void (*method_t)(void *self, void *method);
 typedef void (*method_b_t)(void *self, int arg, void *method);
 typedef int (*static_i_t)(int arg, void *method);
 
+extern volatile int na_pad_mode;
 static uintptr_t base;
 #define FN(rva) ((void *)(base + (rva)))
 
@@ -254,6 +255,7 @@ static void pad_update(void *self, void *method) {
     menu_dirs(&pad, now, &dir_pressed);
 
     int mode = I32(self, MGR_INPUT_MODE);
+    na_pad_mode = mode;
     static int last_mode = -1, modes_logged = 0;
     if (mode != last_mode && modes_logged < 40) {
         modes_logged++;
@@ -323,6 +325,7 @@ static void pad_update(void *self, void *method) {
 }
 
 int na_pad_active = 0;
+volatile int na_pad_mode = -1; // the game's input mode (2: a run), for the GPU profiler
 
 /** After libil2cpp.so is relocated, before its caches are flushed. */
 void na_pad_install(void) {

@@ -296,6 +296,27 @@ static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const 
     src[pos] = 0;
 
     int frag = shader < MAX_SHADER_IDS ? shader_is_fragment[shader] : 0;
+    /*
+     * The post-processing stack's copy pass with its NaN check: hlslcc turned
+     * the check into integer bit operations that GLSL ES 1.00 lacks, emulated
+     * with 32-step loops (op_or, op_modi), for every pixel of the full-size
+     * target each frame. Colours here are never NaN: a plain copy instead.
+     */
+    if (frag && strstr(src, "op_or(") && strstr(src, "lessThan(u_xlat0, vec4(0.0, 0.0, 0.0, 0.0))") &&
+        strstr(src, "texture2D(_MainTex, vs_TEXCOORD0.xy)") && strstr(src, "varying highp vec2 vs_TEXCOORD0;")) {
+        static const char copy_src[] =
+            "#version 100\n"
+            "precision mediump float;\n"
+            "uniform lowp sampler2D _MainTex;\n"
+            "varying highp vec2 vs_TEXCOORD0;\n"
+            "void main()\n"
+            "{\n"
+            "    gl_FragData[0] = texture2D(_MainTex, vs_TEXCOORD0.xy);\n"
+            "}\n";
+        free(src);
+        src = strdup(copy_src);
+        l_info("[GL] shader %u: the post-processing copy with its emulated NaN check is a plain copy", shader);
+    }
     int changed = 0;
     char *t = na_shaders_translate(src, frag, &changed);
 #ifdef NA_RELEASE
@@ -2115,13 +2136,16 @@ static uint32_t prof_draws[MAX_PROGS]; // draws per program since the last step
 static GLuint prof_skip = 0;
 volatile int na_prof_request = 0;
 
-#define PROF_FRAMES 90
-#define PROF_SETTLE 15
-#define PROF_PROGS 16
-static int prof_state = -1; // -1 off, 0 baseline, 1.. program steps
+#define PROF_FRAMES 160  // per program: blocks of 10 frames with and without it, alternating
+#define PROF_BLOCK 10
+#define PROF_SETTLE 2    // frames at the start of a block that are not counted
+#define PROF_PROGS 24
+extern volatile int na_pad_mode; // na_pad.c: 2 in a run
+static int prof_state = -1; // -1 off, 0 collecting the programs, 1.. program steps
 static int prof_frame;
-static uint64_t prof_t0;
-static float prof_base_ms;
+static uint64_t prof_last;
+static uint64_t prof_on_us, prof_off_us;
+static int prof_on_n, prof_off_n;
 static GLuint prof_list[PROF_PROGS];
 static uint32_t prof_list_draws[PROF_PROGS];
 static int prof_n;
@@ -2129,6 +2153,8 @@ static void prof_log_shader(GLuint prog);
 
 void na_gl_prof_swap(void) {
     uint64_t now = sceKernelGetProcessTimeWide();
+    uint64_t ft = prof_last ? now - prof_last : 0;
+    prof_last = now;
     if (prof_state < 0) {
         if (!na_prof_request) {
             memset(prof_draws, 0, sizeof(prof_draws));
@@ -2142,16 +2168,13 @@ void na_gl_prof_swap(void) {
         l_info("[PROF] GPU cost profiler started (L+R+UP)");
         return;
     }
-    prof_frame++;
-    if (prof_frame == PROF_SETTLE) {
-        prof_t0 = now;
-        if (prof_state == 0) memset(prof_draws, 0, sizeof(prof_draws));
+    // only frames of a run count (menus, death screens and loads are left out)
+    if (na_pad_mode != 2 || ft > 500000) {
+        prof_skip = 0;
+        return;
     }
-    if (prof_frame < PROF_FRAMES) return;
-    float ms = (float)(now - prof_t0) / 1000.0f / (PROF_FRAMES - PROF_SETTLE);
     if (prof_state == 0) {
-        prof_base_ms = ms;
-        // the programs drawn most in the baseline
+        if (++prof_frame < 60) return;
         prof_n = 0;
         for (int k = 0; k < PROF_PROGS; k++) {
             uint32_t best = 0;
@@ -2169,22 +2192,39 @@ void na_gl_prof_swap(void) {
             prof_list_draws[prof_n] = best;
             prof_n++;
         }
-        l_info("[PROF] baseline: %.1f ms a frame, %d programs drawn", ms, prof_n);
+        l_info("[PROF] %d programs drawn in 60 frames of the run; each is now left out every other 10 frames", prof_n);
+        prof_state = 1;
+        prof_frame = 0;
+        prof_on_us = prof_off_us = 0;
+        prof_on_n = prof_off_n = 0;
     } else {
-        GLuint p = prof_list[prof_state - 1];
-        l_info("[PROF] without program %u (%.1f draws a frame): %.1f ms a frame -> it costs %.1f ms", p,
-               (float)prof_list_draws[prof_state - 1] / (PROF_FRAMES - PROF_SETTLE), ms, prof_base_ms - ms);
-        prof_log_shader(p);
+        // the frame that just ended: with or without the program?
+        int block = prof_frame / PROF_BLOCK, in_block = prof_frame % PROF_BLOCK;
+        if (in_block >= PROF_SETTLE && prof_frame > 0) {
+            if (block & 1) { prof_off_us += ft; prof_off_n++; }
+            else { prof_on_us += ft; prof_on_n++; }
+        }
+        prof_frame++;
+        if (prof_frame >= PROF_FRAMES) {
+            GLuint p = prof_list[prof_state - 1];
+            float on = prof_on_n ? prof_on_us / 1000.0f / prof_on_n : 0, off = prof_off_n ? prof_off_us / 1000.0f / prof_off_n : 0;
+            l_info("[PROF] program %u (%.1f draws a frame): %.1f ms a frame with it, %.1f ms without -> costs %.1f ms", p,
+                   prof_list_draws[prof_state - 1] / 60.0f, on, off, on - off);
+            prof_log_shader(p);
+            prof_state++;
+            prof_frame = 0;
+            prof_on_us = prof_off_us = 0;
+            prof_on_n = prof_off_n = 0;
+            if (prof_state > prof_n) {
+                l_info("[PROF] done");
+                prof_state = -1;
+                prof_skip = 0;
+                return;
+            }
+        }
     }
-    if (prof_state >= prof_n) {
-        l_info("[PROF] done");
-        prof_state = -1;
-        prof_skip = 0;
-        return;
-    }
-    prof_skip = prof_list[prof_state];
-    prof_state++;
-    prof_frame = 0;
+    // the next frame: odd blocks without the program
+    prof_skip = ((prof_frame / PROF_BLOCK) & 1) ? prof_list[prof_state - 1] : 0;
 }
 
 static void glCompileShader_na(GLuint s) {
@@ -2434,7 +2474,10 @@ static int trace_this_draw(void) {
 }
 
 static void prof_log_shader(GLuint prog) {
-    const char *fs = prog < MAX_PROG_SRC ? prog_frag_src[prog] : NULL;
+    static uint8_t logged[MAX_PROG_SRC];
+    if (prog >= MAX_PROG_SRC || logged[prog]) return;
+    logged[prog] = 1;
+    const char *fs = prog_frag_src[prog];
     if (!fs) return;
     // only the lines that do something (uniforms, samplers, the body)
     int lines = 0;
