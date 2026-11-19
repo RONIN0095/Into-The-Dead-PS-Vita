@@ -270,6 +270,22 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     }
     na_input_draw_cursor();
     { void na_gl_prof_swap(void); na_gl_prof_swap(); } // GPU cost profiler (L+R+UP)
+    {
+        /*
+         * Runs at an even 30 fps. A run's frame takes ~20 ms of CPU and ~18 ms
+         * of GPU time: too much for 60, so with vsync the frames alternated
+         * between 16.7, 33.3 and 50 ms (uneven, felt like stutter and input
+         * lag). A frame is handed over no sooner than 31 ms after the one
+         * before; vsync then shows it on the next refresh, every second one.
+         * Menus stay at 60.
+         */
+        extern volatile int na_pad_mode; // na_pad.c: 2 in a run
+        static uint64_t last_swap = 0;
+        uint64_t now = sceKernelGetProcessTimeWide();
+        if (na_pad_mode == 2 && last_swap && now - last_swap < 31000)
+            sceKernelDelayThread((SceUInt)(31000 - (now - last_swap)));
+        last_swap = sceKernelGetProcessTimeWide();
+    }
     uint64_t t0 = sceKernelGetProcessTimeWide();
     vglSwapBuffers(GL_FALSE);
     na_stats.swap_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);

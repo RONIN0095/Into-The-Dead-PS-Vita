@@ -730,9 +730,11 @@ static GLint single_channel_ifmt(GLenum ifmt, GLenum unsized) {
  * the GPU to shade. The screen itself and Unity's own idea of the sizes
  * stay at 960x544 (renderbuffer queries answer the asked size).
  */
-// 5/8 (600x340): at 3/4 a run's frame still took ~50 ms, nearly all of it waiting for the GPU inside the draws
-#define RT_SCALE_NUM 5
-#define RT_SCALE_DEN 8
+// 3/4 (720x408). At 5/8 (600x340) a run's frame took ~18 ms of GPU time and
+// ~20 ms of CPU time (profiler); runs are paced at 30 fps (na_egl.c), which
+// leaves the GPU room for the sharper picture.
+#define RT_SCALE_NUM 3
+#define RT_SCALE_DEN 4
 static int rt_is_screen(GLsizei w, GLsizei h) { return w == 960 && h == 544; } // the screen
 static GLsizei rt_scale(GLsizei v) { return v * RT_SCALE_NUM / RT_SCALE_DEN; }
 
