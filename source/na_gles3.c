@@ -1090,9 +1090,103 @@ static int etc_opaque = 0;
 // Time the texture cache spends opening, reading and unpacking (hitch line)
 volatile uint32_t na_tc_open_us, na_tc_read_us, na_tc_unzip_us, na_tc_n;
 
+/*
+ * The texture cache is one pack file (texcache/pack.bin) with an index
+ * (texcache/pack.idx: fixed records of name, offset, size). It used to be
+ * one file per texture, and opening a file on the memory card took ~24 ms:
+ * 105 files cost 2.5 s of the menu's load in opens alone. Older single files
+ * are moved into the pack when they are first read.
+ */
+#define PACK_PATH DATA_PATH "texcache/pack.bin"
+#define IDX_PATH DATA_PATH "texcache/pack.idx"
+typedef struct {
+    char name[56];
+    uint32_t off, size;
+} pack_rec;
+static pack_rec *pack_idx;
+static int pack_n, pack_cap, pack_state; // 0 not opened, 1 ready, -1 no pack
+static SceUID pack_fd = -1, idx_fd = -1;
+static uint32_t pack_end;
+
+static const char *base_name(const char *path) {
+    const char *b = strrchr(path, '/');
+    return b ? b + 1 : path;
+}
+
+static int pack_open(void) {
+    if (pack_state) return pack_state > 0;
+    pack_state = -1;
+    mkdir(DATA_PATH "texcache", 0777);
+    pack_fd = sceIoOpen(PACK_PATH, SCE_O_RDWR | SCE_O_CREAT, 0666);
+    if (pack_fd < 0) return 0;
+    pack_end = (uint32_t)sceIoLseek(pack_fd, 0, SCE_SEEK_END);
+    SceUID r = sceIoOpen(IDX_PATH, SCE_O_RDONLY, 0);
+    if (r >= 0) {
+        long n = (long)sceIoLseek(r, 0, SCE_SEEK_END) / (long)sizeof(pack_rec);
+        pack_cap = (int)n + 256;
+        pack_idx = malloc(sizeof(pack_rec) * pack_cap);
+        if (pack_idx && n > 0 && sceIoPread(r, pack_idx, sizeof(pack_rec) * n, 0) == (int)(sizeof(pack_rec) * n)) pack_n = (int)n;
+        sceIoClose(r);
+        // records whose data didn't make it into the pack (cut off) are dropped
+        while (pack_n > 0 && pack_idx[pack_n - 1].off + pack_idx[pack_n - 1].size > pack_end) pack_n--;
+    }
+    idx_fd = sceIoOpen(IDX_PATH, SCE_O_WRONLY | SCE_O_CREAT, 0666);
+    if (idx_fd < 0) return 0;
+    pack_state = 1;
+    l_info("[texcache] pack: %d textures, %u KB", pack_n, (unsigned)(pack_end / 1024));
+    return 1;
+}
+
+static pack_rec *pack_find(const char *name) {
+    for (int i = pack_n - 1; i >= 0; i--)
+        if (strcmp(pack_idx[i].name, name) == 0) return &pack_idx[i];
+    return NULL;
+}
+
+// Adds compressed data to the pack
+static void pack_add(const char *name, const uint8_t *z, uint32_t zn) {
+    if (!pack_open() || strlen(name) >= sizeof(((pack_rec *)0)->name)) return;
+    if (pack_n == pack_cap) {
+        pack_rec *n = realloc(pack_idx, sizeof(pack_rec) * (pack_cap + 256));
+        if (!n) return;
+        pack_idx = n;
+        pack_cap += 256;
+    }
+    if (sceIoPwrite(pack_fd, z, zn, pack_end) != (int)zn) return;
+    pack_rec *r = &pack_idx[pack_n];
+    memset(r, 0, sizeof(*r));
+    strcpy(r->name, name);
+    r->off = pack_end;
+    r->size = zn;
+    sceIoPwrite(idx_fd, r, sizeof(*r), (SceOff)pack_n * sizeof(*r));
+    pack_n++;
+    pack_end += zn;
+}
+
+static int unpack_to(uint8_t *dst, size_t size, const uint8_t *z, uint32_t zn) {
+    uint64_t t = sceKernelGetProcessTimeWide();
+    uLongf out = size;
+    int ok = uncompress(dst, &out, z, zn) == Z_OK && out == size;
+    na_tc_unzip_us += (uint32_t)(sceKernelGetProcessTimeWide() - t);
+    return ok;
+}
+
 static int cache_read(const char *path, uint8_t *dst, size_t size) {
-    // sceIo directly: newlib's fopen/fseek/ftell/fread took several calls more
+    const char *name = base_name(path);
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    na_tc_n++;
+    if (pack_open()) {
+        pack_rec *r = pack_find(name);
+        if (r) {
+            uint8_t *z = malloc(r->size);
+            int ok = z && sceIoPread(pack_fd, z, r->size, r->off) == (int)r->size;
+            na_tc_read_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+            ok = ok && unpack_to(dst, size, z, r->size);
+            free(z);
+            if (ok) return 1;
+        }
+    }
+    // an older single file: read it and move it into the pack
     SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
     uint64_t t1 = sceKernelGetProcessTimeWide();
     na_tc_open_us += (uint32_t)(t1 - t0);
@@ -1101,27 +1195,22 @@ static int cache_read(const char *path, uint8_t *dst, size_t size) {
     uint8_t *z = zn > 0 ? malloc(zn) : NULL;
     int ok = 0;
     if (z && sceIoPread(fd, z, zn, 0) == zn) {
-        uint64_t t2 = sceKernelGetProcessTimeWide();
-        na_tc_read_us += (uint32_t)(t2 - t1);
-        uLongf out = size;
-        ok = uncompress(dst, &out, z, zn) == Z_OK && out == size;
-        na_tc_unzip_us += (uint32_t)(sceKernelGetProcessTimeWide() - t2);
+        na_tc_read_us += (uint32_t)(sceKernelGetProcessTimeWide() - t1);
+        ok = unpack_to(dst, size, z, (uint32_t)zn);
     }
-    na_tc_n++;
-    free(z);
     sceIoClose(fd);
+    if (ok) {
+        pack_add(name, z, (uint32_t)zn);
+        sceIoRemove(path);
+    }
+    free(z);
     return ok;
 }
 
 static void cache_write(const char *path, const uint8_t *src, size_t size) {
-    mkdir(DATA_PATH "texcache", 0777);
     uLongf zn = compressBound(size);
     uint8_t *z = malloc(zn);
-    FILE *f;
-    if (z && compress2(z, &zn, src, size, 1) == Z_OK && (f = fopen(path, "wb"))) {
-        fwrite(z, 1, zn, f);
-        fclose(f);
-    }
+    if (z && compress2(z, &zn, src, size, 1) == Z_OK) pack_add(base_name(path), z, (uint32_t)zn);
     free(z);
 }
 
