@@ -2180,17 +2180,25 @@ void na_gl_prof_swap(void) {
         extern volatile uint32_t na_prof_finish_us;
         static uint64_t frame_sum;
         if (na_pad_mode != 2 || ft > 500000) return;
+        static uint32_t draw_sum;
         if (prof_frame == 0) {
             na_prof_finish = 1;
             na_prof_finish_us = 0;
             frame_sum = 0;
+            draw_sum = 0;
+            na_gxm_begin_us = na_gxm_end_us = na_gxm_draw_us = na_gxm_unif_us = 0;
         } else {
             frame_sum += ft;
+            draw_sum += na_stats.draw_us; // (the hitch log resets it each frame)
         }
         if (++prof_frame > 120) {
             float fr = frame_sum / 1000.0f / 120, gpu = na_prof_finish_us / 1000.0f / 120;
             l_info("[PROF] frames %.1f ms: the GPU finished %.1f ms after the CPU was done with a frame (CPU ~%.1f ms, GPU at least %.1f ms)",
                    fr, gpu, fr - gpu, gpu);
+            l_info("[PROF] CPU in the draws a frame: %.1f ms in all, of it %.1f ms starting scenes, %.1f ms ending them, "
+                   "%.1f ms in sceGxmDraw, %.1f ms reserving uniform buffers",
+                   draw_sum / 1000.0f / 120, na_gxm_begin_us / 1000.0f / 120, na_gxm_end_us / 1000.0f / 120,
+                   na_gxm_draw_us / 1000.0f / 120, na_gxm_unif_us / 1000.0f / 120);
             na_prof_finish = 0;
             prof_state = 0;
             prof_frame = 0;
@@ -2781,6 +2789,36 @@ int __wrap_sceGxmShaderPatcherCreateFragmentProgram(SceGxmShaderPatcher *sp, Sce
     na_stats.fp_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
     na_stats.fp_n++;
     return r;
+}
+
+/*
+ * Where the CPU's time in vitaGL's draws goes (profiler): the GPU calls
+ * that can wait for the GPU (scene start, uniform ring buffers, draw).
+ */
+volatile uint32_t na_gxm_begin_us, na_gxm_end_us, na_gxm_draw_us, na_gxm_unif_us;
+#define GXM_TIMED(acc, call) uint64_t _t0 = sceKernelGetProcessTimeWide(); int _r = call; acc += (uint32_t)(sceKernelGetProcessTimeWide() - _t0); return _r;
+int __real_sceGxmBeginScene(SceGxmContext *, unsigned int, const SceGxmRenderTarget *, const SceGxmValidRegion *, SceGxmSyncObject *,
+                            SceGxmSyncObject *, const SceGxmColorSurface *, const SceGxmDepthStencilSurface *);
+int __wrap_sceGxmBeginScene(SceGxmContext *c, unsigned int f, const SceGxmRenderTarget *rt, const SceGxmValidRegion *vr,
+                            SceGxmSyncObject *vs, SceGxmSyncObject *fs, const SceGxmColorSurface *cs,
+                            const SceGxmDepthStencilSurface *ds) {
+    GXM_TIMED(na_gxm_begin_us, __real_sceGxmBeginScene(c, f, rt, vr, vs, fs, cs, ds))
+}
+int __real_sceGxmEndScene(SceGxmContext *, const SceGxmNotification *, const SceGxmNotification *);
+int __wrap_sceGxmEndScene(SceGxmContext *c, const SceGxmNotification *v, const SceGxmNotification *f) {
+    GXM_TIMED(na_gxm_end_us, __real_sceGxmEndScene(c, v, f))
+}
+int __real_sceGxmDraw(SceGxmContext *, SceGxmPrimitiveType, SceGxmIndexFormat, const void *, unsigned int);
+int __wrap_sceGxmDraw(SceGxmContext *c, SceGxmPrimitiveType p, SceGxmIndexFormat f, const void *i, unsigned int n) {
+    GXM_TIMED(na_gxm_draw_us, __real_sceGxmDraw(c, p, f, i, n))
+}
+int __real_sceGxmReserveVertexDefaultUniformBuffer(SceGxmContext *, void **);
+int __wrap_sceGxmReserveVertexDefaultUniformBuffer(SceGxmContext *c, void **b) {
+    GXM_TIMED(na_gxm_unif_us, __real_sceGxmReserveVertexDefaultUniformBuffer(c, b))
+}
+int __real_sceGxmReserveFragmentDefaultUniformBuffer(SceGxmContext *, void **);
+int __wrap_sceGxmReserveFragmentDefaultUniformBuffer(SceGxmContext *c, void **b) {
+    GXM_TIMED(na_gxm_unif_us, __real_sceGxmReserveFragmentDefaultUniformBuffer(c, b))
 }
 
 static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, const void *indices) {

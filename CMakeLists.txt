@@ -264,6 +264,11 @@ endif()
 target_link_libraries(${CMAKE_PROJECT_NAME}
                       -Wl,--wrap=sceGxmShaderPatcherCreateVertexProgram
                       -Wl,--wrap=sceGxmShaderPatcherCreateFragmentProgram
+                      -Wl,--wrap=sceGxmBeginScene
+                      -Wl,--wrap=sceGxmEndScene
+                      -Wl,--wrap=sceGxmDraw
+                      -Wl,--wrap=sceGxmReserveVertexDefaultUniformBuffer
+                      -Wl,--wrap=sceGxmReserveFragmentDefaultUniformBuffer
                       -Wl,--whole-archive pthread -Wl,--no-whole-archive
                       OpenSLES
                       sndfile
