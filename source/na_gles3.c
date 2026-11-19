@@ -2141,7 +2141,9 @@ volatile int na_prof_request = 0;
 #define PROF_SETTLE 2    // frames at the start of a block that are not counted
 #define PROF_PROGS 24
 extern volatile int na_pad_mode; // na_pad.c: 2 in a run
-static int prof_state = -1; // -1 off, 0 collecting the programs, 1.. program steps
+volatile int na_prof_finish = 0;
+volatile uint32_t na_prof_finish_us = 0;
+static int prof_state = -1; // -1 off, -2 CPU/GPU split, 0 collecting the programs, 1.. program steps
 static int prof_frame;
 static uint64_t prof_last;
 static uint64_t prof_on_us, prof_off_us;
@@ -2155,17 +2157,45 @@ void na_gl_prof_swap(void) {
     uint64_t now = sceKernelGetProcessTimeWide();
     uint64_t ft = prof_last ? now - prof_last : 0;
     prof_last = now;
-    if (prof_state < 0) {
+    if (prof_state == -1) {
         if (!na_prof_request) {
             memset(prof_draws, 0, sizeof(prof_draws));
             return;
         }
         na_prof_request = 0;
-        prof_state = 0;
+        prof_state = -2; // first: CPU or GPU?
         prof_frame = 0;
         prof_skip = 0;
         memset(prof_draws, 0, sizeof(prof_draws));
         l_info("[PROF] GPU cost profiler started (L+R+UP)");
+        return;
+    }
+    /*
+     * CPU or GPU: for 120 frames of a run the CPU waits after each swap
+     * until the GPU has finished that frame (na_eglSwapBuffers). The wait is
+     * GPU time the CPU did not overlap; the rest of the frame is CPU time.
+     */
+    if (prof_state == -2) {
+        extern volatile int na_prof_finish;
+        extern volatile uint32_t na_prof_finish_us;
+        static uint64_t frame_sum;
+        if (na_pad_mode != 2 || ft > 500000) return;
+        if (prof_frame == 0) {
+            na_prof_finish = 1;
+            na_prof_finish_us = 0;
+            frame_sum = 0;
+        } else {
+            frame_sum += ft;
+        }
+        if (++prof_frame > 120) {
+            float fr = frame_sum / 1000.0f / 120, gpu = na_prof_finish_us / 1000.0f / 120;
+            l_info("[PROF] frames %.1f ms: the GPU finished %.1f ms after the CPU was done with a frame (CPU ~%.1f ms, GPU at least %.1f ms)",
+                   fr, gpu, fr - gpu, gpu);
+            na_prof_finish = 0;
+            prof_state = 0;
+            prof_frame = 0;
+            memset(prof_draws, 0, sizeof(prof_draws));
+        }
         return;
     }
     // only frames of a run count (menus, death screens and loads are left out)

@@ -250,6 +250,7 @@ void na_gl_screenshot(int n); // na_gles3.c
 #include "na_stats.h"
 #include "na_input.h"
 #include <psp2/kernel/processmgr.h>
+#include <psp2/gxm.h>
 
 EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Debug screenshots: 5 s and 20 s into the game
@@ -272,6 +273,17 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     uint64_t t0 = sceKernelGetProcessTimeWide();
     vglSwapBuffers(GL_FALSE);
     na_stats.swap_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+    {
+        // profiler (na_gles3.c): how long the GPU still works on the frame
+        extern volatile int na_prof_finish;
+        extern volatile uint32_t na_prof_finish_us;
+        if (na_prof_finish) {
+            extern SceGxmContext *gxm_context;
+            uint64_t f0 = sceKernelGetProcessTimeWide();
+            sceGxmFinish(gxm_context);
+            na_prof_finish_us += (uint32_t)(sceKernelGetProcessTimeWide() - f0);
+        }
+    }
     na_egl_swap_count++;
     OK(EGL_TRUE);
 }
