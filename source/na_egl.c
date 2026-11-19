@@ -268,6 +268,7 @@ EGLBoolean na_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         l_info("[GL] tracing frame %d (L+R+DOWN)", na_trace_swap);
     }
     na_input_draw_cursor();
+    { void na_gl_prof_swap(void); na_gl_prof_swap(); } // GPU cost profiler (L+R+UP)
     uint64_t t0 = sceKernelGetProcessTimeWide();
     vglSwapBuffers(GL_FALSE);
     na_stats.swap_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);

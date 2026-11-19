@@ -2104,6 +2104,89 @@ static void glUniform1i_na(GLint loc, GLint v) {
 static uint8_t prog_linked[MAX_PROGS];
 static uint8_t prog_shadow[MAX_PROGS]; // shadow caster programs (no shadows on the Vita)
 
+/*
+ * GPU cost profiler, started with L+R+UP in a run. The frame time is taken
+ * for 90 frames as it is, then for 90 frames each with all draws of one
+ * program left out (the 16 programs drawn most). What a program costs is
+ * how much faster the frames get without it. The screen flickers while it
+ * runs (things missing); it takes about a minute and logs a table.
+ */
+static uint32_t prof_draws[MAX_PROGS]; // draws per program since the last step
+static GLuint prof_skip = 0;
+volatile int na_prof_request = 0;
+
+#define PROF_FRAMES 90
+#define PROF_SETTLE 15
+#define PROF_PROGS 16
+static int prof_state = -1; // -1 off, 0 baseline, 1.. program steps
+static int prof_frame;
+static uint64_t prof_t0;
+static float prof_base_ms;
+static GLuint prof_list[PROF_PROGS];
+static uint32_t prof_list_draws[PROF_PROGS];
+static int prof_n;
+static void prof_log_shader(GLuint prog);
+
+void na_gl_prof_swap(void) {
+    uint64_t now = sceKernelGetProcessTimeWide();
+    if (prof_state < 0) {
+        if (!na_prof_request) {
+            memset(prof_draws, 0, sizeof(prof_draws));
+            return;
+        }
+        na_prof_request = 0;
+        prof_state = 0;
+        prof_frame = 0;
+        prof_skip = 0;
+        memset(prof_draws, 0, sizeof(prof_draws));
+        l_info("[PROF] GPU cost profiler started (L+R+UP)");
+        return;
+    }
+    prof_frame++;
+    if (prof_frame == PROF_SETTLE) {
+        prof_t0 = now;
+        if (prof_state == 0) memset(prof_draws, 0, sizeof(prof_draws));
+    }
+    if (prof_frame < PROF_FRAMES) return;
+    float ms = (float)(now - prof_t0) / 1000.0f / (PROF_FRAMES - PROF_SETTLE);
+    if (prof_state == 0) {
+        prof_base_ms = ms;
+        // the programs drawn most in the baseline
+        prof_n = 0;
+        for (int k = 0; k < PROF_PROGS; k++) {
+            uint32_t best = 0;
+            GLuint bp = 0;
+            for (GLuint i = 1; i < MAX_PROGS; i++) {
+                int taken = 0;
+                for (int j = 0; j < prof_n; j++) taken |= prof_list[j] == i;
+                if (!taken && prof_draws[i] > best) {
+                    best = prof_draws[i];
+                    bp = i;
+                }
+            }
+            if (!bp) break;
+            prof_list[prof_n] = bp;
+            prof_list_draws[prof_n] = best;
+            prof_n++;
+        }
+        l_info("[PROF] baseline: %.1f ms a frame, %d programs drawn", ms, prof_n);
+    } else {
+        GLuint p = prof_list[prof_state - 1];
+        l_info("[PROF] without program %u (%.1f draws a frame): %.1f ms a frame -> it costs %.1f ms", p,
+               (float)prof_list_draws[prof_state - 1] / (PROF_FRAMES - PROF_SETTLE), ms, prof_base_ms - ms);
+        prof_log_shader(p);
+    }
+    if (prof_state >= prof_n) {
+        l_info("[PROF] done");
+        prof_state = -1;
+        prof_skip = 0;
+        return;
+    }
+    prof_skip = prof_list[prof_state];
+    prof_state++;
+    prof_frame = 0;
+}
+
 static void glCompileShader_na(GLuint s) {
     glCompileShader(s);
     GLint ok = 1;
@@ -2222,7 +2305,24 @@ static int check_draw(GLsizei count, GLenum type, const void *indices, GLint bas
     if (desc_size) desc[0] = 0;
     if (!program_ok()) return 0;
     // no shadows: a 2D game on a small screen, and the pass cost GPU time
+    // each program's first draw: logged with its fragment shader (what is new
+    // on screen, e.g. a muzzle flash, can be found by its time in the log)
+    if (cur_program < MAX_PROG_SRC) {
+        static uint8_t seen[MAX_PROG_SRC];
+        if (!seen[cur_program]) {
+            seen[cur_program] = 1;
+            l_info("[GL] program %u drawn for the first time%s (blend %s 0x%x/0x%x)", cur_program,
+                   prog_shadow[cur_program] ? " (shadow caster: skipped)" : "", blend_on ? "on" : "off", blend_f[0],
+                   blend_f[1]);
+            prof_log_shader(cur_program);
+        }
+    }
     if (cur_program < MAX_PROGS && prog_shadow[cur_program]) return 0;
+    // GPU cost profiler (L+R+UP): one program's draws left out at a time
+    if (cur_program < MAX_PROGS) {
+        prof_draws[cur_program]++;
+        if (cur_program == prof_skip) return 0;
+    }
     check_empty_textures();
     // Every index and position of the draw is only gone through in a traced
     // frame (L+R+DOWN). It used to be done for every draw, to keep bad draws
@@ -2331,6 +2431,22 @@ static int trace_this_draw(void) {
     }
     if (na_egl_swap_count == na_trace_swap) return frame_traced++ < 500;
     return na_egl_swap_count >= TRACE_FROM_SWAP && draws_traced < TRACED_DRAWS;
+}
+
+static void prof_log_shader(GLuint prog) {
+    const char *fs = prog < MAX_PROG_SRC ? prog_frag_src[prog] : NULL;
+    if (!fs) return;
+    // only the lines that do something (uniforms, samplers, the body)
+    int lines = 0;
+    while (*fs && lines < 60) {
+        const char *nl = strchr(fs, '\n');
+        int n = nl ? (int)(nl - fs) : (int)strlen(fs);
+        if (n > 0 && !strstr(fs, "precision") && strncmp(fs, "#", 1) != 0) {
+            l_info("[PROF]   %u| %.*s", prog, n > 200 ? 200 : n, fs);
+            lines++;
+        }
+        fs += n + (nl ? 1 : 0);
+    }
 }
 
 static void traced(const char *what, const char *desc) {

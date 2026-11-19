@@ -142,6 +142,13 @@ static uint32_t vpad_buttons(void) {
     if (combo && !trace_combo) na_trace_request = 1;
 #endif
     trace_combo = combo;
+    // L+R+UP: the GPU cost profiler (na_gles3.c)
+    static int prof_combo = 0;
+    int pc = (b & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_UP)) ==
+             (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_UP);
+    extern volatile int na_prof_request;
+    if (pc && !prof_combo) na_prof_request = 1;
+    prof_combo = pc;
     if (pad.lx < 64) b |= VPAD_LEFT;
     if (pad.lx > 192) b |= VPAD_RIGHT;
     // L+R+SELECT is the watchdog's core dump combo: no touches for it
