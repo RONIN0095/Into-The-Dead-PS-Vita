@@ -117,6 +117,7 @@ set(SOURCES
     source/na_android.c
     source/na_apk.c
     source/na_dynlib.c
+    source/na_cores.c
     source/na_egl.c
     source/na_gles3.c
     source/na_input.c

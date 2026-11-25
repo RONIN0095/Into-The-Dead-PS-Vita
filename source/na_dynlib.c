@@ -237,9 +237,9 @@ static long sysconf_na(int name) {
         case BIONIC_SC_CLK_TCK: return 100;
         case BIONIC_SC_PAGESIZE:
         case BIONIC_SC_PAGE_SIZE: return 4096;
-        // Three cores are usable by applications
+        // Three cores are usable by applications, four with CapUnlocker (na_cores.c)
         case BIONIC_SC_NPROCESSORS_CONF:
-        case BIONIC_SC_NPROCESSORS_ONLN: return 3;
+        case BIONIC_SC_NPROCESSORS_ONLN: { extern int na_cores; return na_cores; }
         case BIONIC_SC_PHYS_PAGES: return (512 * 1024 * 1024) / 4096;
         case BIONIC_SC_AVPHYS_PAGES: return (256 * 1024 * 1024) / 4096;
         default:
@@ -1357,7 +1357,8 @@ static int pthread_getcpuclockid_na(void *thread, int *clock) {
 static int sched_getaffinity_na(int pid, size_t size, void *mask) {
     if (mask && size) {
         memset(mask, 0, size);
-        *(uint8_t *)mask = 0x7;
+        extern int na_cores;
+        *(uint8_t *)mask = na_cores == 4 ? 0xF : 0x7;
     }
     return 0;
 }

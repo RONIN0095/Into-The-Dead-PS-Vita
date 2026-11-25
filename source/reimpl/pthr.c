@@ -253,6 +253,9 @@ static void *thread_tramp(void *p) {
     na_tramp t = *(na_tramp *) p;
     free(p);
     na_thread_register("pthread", (void *)t.start);
+    int na_cores_thread_mask(void);
+    int mask = na_cores_thread_mask();
+    if (mask) sceKernelChangeThreadCpuAffinityMask(0, mask); // the fourth core too (na_cores.c)
     return t.start(t.param);
 }
 

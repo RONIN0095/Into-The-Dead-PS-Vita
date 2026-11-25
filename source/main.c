@@ -189,6 +189,7 @@ int main() {
     if (!file_exists(DATA_PATH "base.apk"))
         fatal_error("Missing game file:\n%sbase.apk\n\nCopy the game's APK there (renamed to base.apk).", DATA_PATH);
 
+    { void na_cores_probe(void); na_cores_probe(); } // before Unity counts the cores
     soloader_init_all();
     jni_objects_install();
     l_info("Loader initialized.");

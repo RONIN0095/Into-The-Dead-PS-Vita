@@ -82,7 +82,7 @@ FILE * fopen_soloader(const char * filename, const char * mode) {
     // Three cores for applications at 444 MHz
     if (strcmp(filename, "/sys/devices/system/cpu/present") == 0 ||
         strcmp(filename, "/sys/devices/system/cpu/possible") == 0) {
-        return fopen_soloader("app0:/cpu_present", mode);
+        { const char *na_cores_present_file(void); return fopen_soloader(na_cores_present_file(), mode); }
     } else if (strstr(filename, "/sys/devices/system/cpu/cpu") == filename && strstr(filename, "cpuinfo_max_freq")) {
         return fopen_soloader("app0:/cpu_max_freq", mode);
     } else if (strcmp(filename, "/proc/cpuinfo") == 0) {
@@ -121,7 +121,7 @@ int open_soloader(const char * path, int oflag, ...) {
     MAP_PATH(path);
     if (strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
         strcmp(path, "/sys/devices/system/cpu/possible") == 0) {
-        return open_soloader("app0:/cpu_present", oflag);
+        { const char *na_cores_present_file(void); return open_soloader(na_cores_present_file(), oflag); }
     } else if (strstr(path, "/sys/devices/system/cpu/cpu") == path && strstr(path, "cpuinfo_max_freq")) {
         return open_soloader("app0:/cpu_max_freq", oflag);
     } else if (strcmp(path, "/proc/cpuinfo") == 0) {
