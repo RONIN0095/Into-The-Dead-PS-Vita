@@ -2096,7 +2096,38 @@ static float prog_o2w[MAX_PROGS][16];
 static GLint prog_vp_loc[MAX_PROGS];
 static float prog_vp[MAX_PROGS][16];
 
+/*
+ * Uniform arrays are named "name[0]" by GL drivers (glGetActiveUniform);
+ * vitaGL gives the bare name. Unity then rejected the light arrays of its
+ * vertex-lit shaders ("GLSL: unsupported array parameter
+ * 'unity_LightColor'") and drew those meshes without their lights: the
+ * pistol's muzzle flash lights the zombies and the ground that way. Arrays
+ * get the "[0]" the driver would add (Unity's own matrices, "hlslcc_mtx4x4"
+ * vec4 arrays, it already took as they were and keep their names), and
+ * glGetUniformLocation drops it again for vitaGL.
+ */
+static void glGetActiveUniform_na(GLuint p, GLuint index, GLsizei bufsize, GLsizei *length, GLint *size, GLenum *type,
+                                  GLchar *name) {
+    GLsizei len = 0;
+    glGetActiveUniform(p, index, bufsize, &len, size, type, name);
+    if (bufsize > 0 && *size > 1 && strncmp(name, "hlslcc_mtx", 10) != 0 && !strchr(name, '[') &&
+        len + 3 < bufsize) {
+        static int logged = 0;
+        if (logged++ < 24) l_info("[GL] program %u: uniform array %s[%d] (type 0x%x) named %s[0]", p, name, *size, *type, name);
+        strcpy(name + len, "[0]");
+        len += 3;
+    }
+    if (length) *length = len;
+}
+
 static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
+    char base[64];
+    size_t nl = strlen(name);
+    if (nl > 3 && nl < sizeof(base) && strcmp(name + nl - 3, "[0]") == 0) {
+        memcpy(base, name, nl - 3);
+        base[nl - 3] = 0;
+        name = base;
+    }
     GLint r = glGetUniformLocation(p, name);
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_ObjectToWorld") == 0) prog_o2w_loc[p] = r;
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_MatrixVP") == 0) prog_vp_loc[p] = r;
@@ -2980,7 +3011,7 @@ static const gl_entry gl_table[] = {
     E(glGetString), E(glGetStringi), E(glGetIntegerv), E(glGetInteger64v), E(glGetFloatv), E(glGetBooleanv),
     E(glCreateShader), E(glShaderSource), E(glGetProgramiv),
     E(glGetActiveUniformBlockiv), E(glGetActiveUniformBlockName), E(glGetUniformIndices),
-    E(glGetActiveUniformsiv), E(glGetShaderPrecisionFormat), E(glDetachShader), E(glValidateProgram),
+    E(glGetActiveUniformsiv), E(glGetActiveUniform), E(glGetShaderPrecisionFormat), E(glDetachShader), E(glValidateProgram),
     E(glIsVertexArray), E(glProgramParameteri),
     E(glDeleteTextures), E(glTexStorage2D), { "glTexStorage2DEXT", (void *)&glTexStorage2D_na },
     E(glCompressedTexSubImage2D), E(glGetTexLevelParameteriv), E(glGetTexLevelParameterfv),
