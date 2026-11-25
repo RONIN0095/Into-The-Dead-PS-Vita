@@ -11,7 +11,7 @@
  *
  * Applications get cores 0-2; the fourth is the system's unless a plugin
  * opens it up. At startup a thread allowed only on core 3 is started: if it
- * runs there within 200 ms, Unity is told about four cores (sysconf,
+ * runs within 200 ms, Unity is told about four cores (sysconf,
  * /sys/devices/system/cpu/present, sched_getaffinity) and its threads may
  * use all four. Otherwise everything stays at three.
  */
@@ -22,6 +22,10 @@
 
 #include "utils/logger.h"
 
+#ifndef SCE_KERNEL_CPU_MASK_USER_3
+#define SCE_KERNEL_CPU_MASK_USER_3 0x80000
+#endif
+
 int na_cores = 3;
 
 #define CPU_PRESENT4 "ux0:data/intothedead/cpu_present4"
@@ -29,7 +33,7 @@ int na_cores = 3;
 static volatile int probe_core = -1;
 
 static int probe_thread(SceSize args, void *argp) {
-    probe_core = sceKernelGetProcessorId();
+    probe_core = 3; // it may only run on core 3: running at all is the answer
     return 0;
 }
 
@@ -53,11 +57,8 @@ void na_cores_probe(void) {
             na_cores = 3;
         }
     }
-    if (na_cores != 4 && r >= 0 && probe_core < 0) {
-        // never ran: core 3 is closed to us
-        sceKernelTerminateThread(t);
-    }
-    sceKernelDeleteThread(t);
+    if (probe_core >= 0 || r < 0)
+        sceKernelDeleteThread(t); // a thread that never ran stays parked, harmless
     l_info("Fourth CPU core: %s (probe ran on core %d); %d cores",
            na_cores == 4 ? "unlocked, used by the game" : "locked (CapUnlocker not installed)", probe_core, na_cores);
 }
