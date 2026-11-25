@@ -332,6 +332,35 @@ int main() {
         }
         last_frame_us = now_us;
 #endif
+        {
+            /*
+             * Where a run's frames go, every 300 frames of a run: Unity's own
+             * frame, of that the draw calls (vitaGL, GPU waits included) and
+             * texture uploads, and the GPU calls vitaGL makes.
+             */
+            extern volatile int na_pad_mode;
+            extern volatile uint32_t na_gxm_begin_us, na_gxm_end_us, na_gxm_draw_us, na_gxm_unif_us;
+            static uint32_t n, u, d, dn, t, gb, ge, gd;
+            static uint32_t b0, e0, d0;
+            if (na_pad_mode == 2) {
+                if (!n) b0 = na_gxm_begin_us, e0 = na_gxm_end_us, d0 = na_gxm_draw_us;
+                n++;
+                u += unity_us;
+                d += na_stats.draw_us;
+                dn += na_stats.draw_n;
+                t += na_stats.tex_us;
+                if (n == 300) {
+                    gb = na_gxm_begin_us - b0, ge = na_gxm_end_us - e0, gd = na_gxm_draw_us - d0;
+                    l_info("[RUN] of that a frame: Unity %.1f ms, draw calls %.1f ms (%u), textures %.1f ms; "
+                           "GPU calls: scene start %.1f ms, scene end %.1f ms, sceGxmDraw %.1f ms",
+                           u / 300000.0f, d / 300000.0f, dn / 300, t / 300000.0f, gb / 300000.0f, ge / 300000.0f,
+                           gd / 300000.0f);
+                    n = u = d = dn = t = 0;
+                }
+            } else {
+                n = u = d = dn = t = 0;
+            }
+        }
         memset((void *)&na_stats, 0, sizeof(na_stats));
         memset(phase_us, 0, sizeof(phase_us));
     }
