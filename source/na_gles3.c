@@ -730,10 +730,12 @@ static GLint single_channel_ifmt(GLenum ifmt, GLenum unsized) {
  * the GPU to shade. The screen itself and Unity's own idea of the sizes
  * stay at 960x544 (renderbuffer queries answer the asked size).
  */
-// 5/8 (600x340). At 3/4 (720x408) the GPU fell behind: runs took ~67 ms a
-// frame (hardware log of 2b8bbc1); at 5/8 a frame needs ~18 ms of GPU time.
-#define RT_SCALE_NUM 5
-#define RT_SCALE_DEN 8
+// 3/4 (720x408). It was too much for the GPU while every scene loaded and
+// stored its depth buffer (~67 ms a run frame, build 2b8bbc1); since depth
+// stays on chip (vitaGL patch "depth-store-switch") the draws no longer wait
+// for the GPU at 5/8 (2.6 ms a frame of draw calls, build 67f3a41).
+#define RT_SCALE_NUM 3
+#define RT_SCALE_DEN 4
 static int rt_is_screen(GLsizei w, GLsizei h) { return w == 960 && h == 544; } // the screen
 static GLsizei rt_scale(GLsizei v) { return v * RT_SCALE_NUM / RT_SCALE_DEN; }
 

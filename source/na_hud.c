@@ -110,6 +110,8 @@ static void quality_tick(void) {
     static void *(*resolve)(const char *);
     static int (*get_tex)(void);
     static void (*set_tex)(int), (*set_aa)(int), (*set_aniso)(int), (*set_shadows)(int), (*set_soft)(int);
+    static int (*get_skin)(void);
+    static void (*set_skin)(int);
     static int looked = 0;
     if (!looked) {
         looked = 1;
@@ -121,6 +123,11 @@ static void quality_tick(void) {
         set_aniso = resolve("UnityEngine.QualitySettings::set_anisotropicFiltering(UnityEngine.AnisotropicFiltering)");
         set_shadows = resolve("UnityEngine.QualitySettings::set_shadows(UnityEngine.ShadowQuality)");
         set_soft = resolve("UnityEngine.QualitySettings::set_softParticles(System.Boolean)");
+        get_skin = resolve("UnityEngine.QualitySettings::get_skinWeights()");
+        set_skin = resolve("UnityEngine.QualitySettings::set_skinWeights(UnityEngine.SkinWeights)");
+        if (!get_skin) get_skin = resolve("UnityEngine.QualitySettings::get_blendWeights()");
+        if (!set_skin) set_skin = resolve("UnityEngine.QualitySettings::set_blendWeights(UnityEngine.BlendWeights)");
+        l_info("[HUD] skin weights icalls %p/%p", get_skin, set_skin);
         // Loading in the background as fast as it goes (High: the loading
         // thread runs at a high priority and the main thread integrates up
         // to 50 ms of loaded data a frame instead of 10)
@@ -141,6 +148,19 @@ static void quality_tick(void) {
     if (set_aniso) set_aniso(0);
     if (set_shadows) set_shadows(0);
     if (set_soft) set_soft(0);
+    /*
+     * Two bones a vertex for skinned meshes instead of four. Late in a run,
+     * with many zombies on screen, Unity's CPU work (the meshes are skinned
+     * on the CPU: no transform feedback in vitaGL) grew to ~36 ms a frame;
+     * the zombies' weights beyond the second bone are small.
+     */
+    if (get_skin && set_skin) {
+        int w = get_skin();
+        if (w > 2) {
+            set_skin(2);
+            l_info("[HUD] QualitySettings.skinWeights %d -> 2", w);
+        }
+    }
 }
 
 void na_hud_tick(int frame) {
