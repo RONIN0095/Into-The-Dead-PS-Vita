@@ -17,7 +17,7 @@
  */
 
 #include <psp2/kernel/threadmgr.h>
-#include <psp2/kernel/iofilemgr.h>
+#include <psp2/io/fcntl.h>
 #include <string.h>
 
 #include "utils/logger.h"
