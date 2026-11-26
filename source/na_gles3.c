@@ -2162,9 +2162,15 @@ static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
             const char *fs = cur_program < MAX_PROG_SRC ? prog_frag_src[cur_program] : NULL;
             prog_is_flash[cur_program] = fs && strstr(fs, "SV_Target0 = u_xlat10_0 * _Color;") ? 1 : -1;
         }
-        static float last[MAX_PROGS][4];
-        if (prog_is_flash[cur_program] > 0 && memcmp(last[cur_program], v, sizeof(last[0])) != 0) {
-            memcpy(last[cur_program], v, sizeof(last[0]));
+        // only colours not seen before (several materials share the shader;
+        // the flash fades through new values when the pistol fires)
+        static float seen[256][4];
+        static int n_seen = 0;
+        int k;
+        for (k = 0; k < n_seen; k++)
+            if (memcmp(seen[k], v, sizeof(seen[0])) == 0) break;
+        if (prog_is_flash[cur_program] > 0 && k == n_seen) {
+            if (n_seen < 256) memcpy(seen[n_seen++], v, sizeof(seen[0]));
             flash_logs++;
             l_info("[FLASH] frame %d program %u _Color %.3f %.3f %.3f %.3f (texture %u)", na_egl_swap_count, cur_program,
                    v[0], v[1], v[2], v[3], unit_tex[0]);
