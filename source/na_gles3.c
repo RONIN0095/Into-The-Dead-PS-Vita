@@ -2102,6 +2102,12 @@ static float prog_o2w[MAX_PROGS][16];
 
 // and the view-projection matrix, for the near plane check (cut_near_triangles)
 static GLint prog_vp_loc[MAX_PROGS];
+
+// _Color of the additive "texture * _Color" shader (the muzzle flash: a mesh
+// at the pistol's barrel drawn every frame, lit through _Color when firing)
+static GLint prog_color_loc[MAX_PROGS];
+static int8_t prog_is_flash[MAX_PROGS]; // -1 no, 1 yes, 0 not looked at yet
+static int flash_logs = 0;
 static float prog_vp[MAX_PROGS][16];
 
 /*
@@ -2137,6 +2143,7 @@ static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
         name = base;
     }
     GLint r = glGetUniformLocation(p, name);
+    if (p < MAX_PROGS && strcmp(name, "_Color") == 0) prog_color_loc[p] = r;
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_ObjectToWorld") == 0) prog_o2w_loc[p] = r;
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_MatrixVP") == 0) prog_vp_loc[p] = r;
     LOG_CALL("glGetUniformLocation(%u, %s) = %d", p, name, r);
@@ -2150,6 +2157,19 @@ static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
         memcpy(prog_o2w[cur_program], v, sizeof(prog_o2w[0]));
     if (count == 4 && cur_program < MAX_PROGS && prog_vp_loc[cur_program] == loc && loc)
         memcpy(prog_vp[cur_program], v, sizeof(prog_vp[0]));
+    if (loc > 0 && cur_program < MAX_PROGS && prog_color_loc[cur_program] == loc && flash_logs < 300) {
+        if (!prog_is_flash[cur_program]) {
+            const char *fs = cur_program < MAX_PROG_SRC ? prog_frag_src[cur_program] : NULL;
+            prog_is_flash[cur_program] = fs && strstr(fs, "SV_Target0 = u_xlat10_0 * _Color;") ? 1 : -1;
+        }
+        static float last[MAX_PROGS][4];
+        if (prog_is_flash[cur_program] > 0 && memcmp(last[cur_program], v, sizeof(last[0])) != 0) {
+            memcpy(last[cur_program], v, sizeof(last[0]));
+            flash_logs++;
+            l_info("[FLASH] frame %d program %u _Color %.3f %.3f %.3f %.3f (texture %u)", na_egl_swap_count, cur_program,
+                   v[0], v[1], v[2], v[3], unit_tex[0]);
+        }
+    }
     glUniform4fv(loc, count, v);
 }
 
