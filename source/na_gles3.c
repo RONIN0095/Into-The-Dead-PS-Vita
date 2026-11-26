@@ -2108,6 +2108,8 @@ static GLint prog_vp_loc[MAX_PROGS];
 static GLint prog_color_loc[MAX_PROGS];
 static int8_t prog_is_flash[MAX_PROGS]; // -1 no, 1 yes, 0 not looked at yet
 static int flash_logs = 0;
+static GLint prog_tint_loc[MAX_PROGS];
+static float prog_tint[MAX_PROGS][4]; // last _TintColor of each program
 static float prog_vp[MAX_PROGS][16];
 
 /*
@@ -2144,6 +2146,7 @@ static GLint glGetUniformLocation_na(GLuint p, const GLchar *name) {
     }
     GLint r = glGetUniformLocation(p, name);
     if (p < MAX_PROGS && strcmp(name, "_Color") == 0) prog_color_loc[p] = r;
+    if (p < MAX_PROGS && strcmp(name, "_TintColor") == 0) prog_tint_loc[p] = r;
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_ObjectToWorld") == 0) prog_o2w_loc[p] = r;
     if (p < MAX_PROGS && strcmp(name, "hlslcc_mtx4x4unity_MatrixVP") == 0) prog_vp_loc[p] = r;
     LOG_CALL("glGetUniformLocation(%u, %s) = %d", p, name, r);
@@ -2157,6 +2160,9 @@ static void glUniform4fv_na(GLint loc, GLsizei count, const GLfloat *v) {
         memcpy(prog_o2w[cur_program], v, sizeof(prog_o2w[0]));
     if (count == 4 && cur_program < MAX_PROGS && prog_vp_loc[cur_program] == loc && loc)
         memcpy(prog_vp[cur_program], v, sizeof(prog_vp[0]));
+    if (loc > 0 && cur_program < MAX_PROGS && prog_tint_loc[cur_program] == loc) {
+        memcpy(prog_tint[cur_program], v, 16);
+    }
     if (loc > 0 && cur_program < MAX_PROGS && prog_color_loc[cur_program] == loc && flash_logs < 300) {
         if (!prog_is_flash[cur_program]) {
             const char *fs = cur_program < MAX_PROG_SRC ? prog_frag_src[cur_program] : NULL;
@@ -2905,6 +2911,54 @@ int __wrap_sceGxmReserveFragmentDefaultUniformBuffer(SceGxmContext *c, void **b)
     GXM_TIMED(na_gxm_unif_us, __real_sceGxmReserveFragmentDefaultUniformBuffer(c, b))
 }
 
+/*
+ * The muzzle flash: a mesh skinned to a joint of the weapon that the fire
+ * animation scales up for a moment (shader "Custom/Particles/Additive",
+ * texture muzzle_flash). In a run, the draws of that shader are logged when
+ * their vertices cover some of the screen, with their _TintColor: whether
+ * the flash is drawn when the pistol fires, and where.
+ */
+static int8_t prog_is_particle[MAX_PROGS];
+static int particle_logs = 0;
+static void particle_draw_log(GLsizei count) {
+    extern volatile int na_pad_mode;
+    if (na_pad_mode != 2 || particle_logs >= 400 || cur_program >= MAX_PROGS) return;
+    if (!prog_is_particle[cur_program]) {
+        const char *fs = cur_program < MAX_PROG_SRC ? prog_frag_src[cur_program] : NULL;
+        prog_is_particle[cur_program] = fs && strstr(fs, "_TintColor") ? 1 : -1;
+    }
+    if (prog_is_particle[cur_program] < 0) return;
+    if (!(cur_vao->vertex_attrib_state & 1) || cur_vao->vertex_attrib_config[0].format != 9) return;
+    vgl_vbo *vb = (vgl_vbo *)cur_vao->vertex_attrib_vbo[0];
+    uint32_t off = cur_vao->vertex_attrib_offsets[0], stride = cur_vao->vertex_stream_config[0].stride;
+    const float *m = prog_o2w[cur_program], *vp = prog_vp[cur_program];
+    float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+    uint32_t end = last_vertex > 4095 ? 4095 : last_vertex;
+    if (!vb || !vb->ptr || off + end * stride + 12 > (uint32_t)vb->size) return;
+    for (uint32_t v = first_vertex; v <= end; v++) {
+        const float *f = (const float *)((const uint8_t *)vb->ptr + off + v * stride);
+        float wp[4], c[4];
+        for (int k = 0; k < 4; k++) wp[k] = m[k] * f[0] + m[4 + k] * f[1] + m[8 + k] * f[2] + m[12 + k];
+        for (int k = 0; k < 4; k++) c[k] = vp[k] * wp[0] + vp[4 + k] * wp[1] + vp[8 + k] * wp[2] + vp[12 + k] * wp[3];
+        if (c[3] <= 0.0001f) continue;
+        for (int k = 0; k < 2; k++) {
+            float q = c[k] / c[3];
+            if (q < lo[k]) lo[k] = q;
+            if (q > hi[k]) hi[k] = q;
+        }
+    }
+    float area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
+    if (!(area > 0.0005f)) return; // collapsed (joint scaled to 0) or behind the camera
+    static int last_frame = -1, logged_this_frame = 0;
+    if (na_egl_swap_count != last_frame) last_frame = na_egl_swap_count, logged_this_frame = 0;
+    if (logged_this_frame++ >= 3) return;
+    particle_logs++;
+    const float *t = prog_tint[cur_program];
+    l_info("[FLASH] frame %d program %u: %d indices, screen x %.2f..%.2f y %.2f..%.2f, _TintColor %.2f %.2f %.2f %.2f, texture %u, blend %s 0x%x/0x%x",
+           na_egl_swap_count, cur_program, (int)count, lo[0], hi[0], lo[1], hi[1], t[0], t[1], t[2], t[3], unit_tex[0],
+           blend_on ? "on" : "off", blend_f[0], blend_f[1]);
+}
+
 static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, const void *indices) {
     char desc[96];
     draw_no++;
@@ -2912,6 +2966,7 @@ static void glDrawElements_na_inner(GLenum mode, GLsizei count, GLenum type, con
     int ok = check_draw(count, type, indices, 0, 0, 1, desc, sizeof(desc));
     na_stats.check_us += (uint32_t)(sceKernelGetProcessTimeWide() - c0);
     if (!ok) return;
+    particle_draw_log(count);
     int t = trace_this_draw();
     if (t) traced("DrawElements", desc);
     masked_draw_begin();
