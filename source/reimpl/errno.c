@@ -111,16 +111,67 @@ static newlib_errno_to_bionic_errno errno_translation[] = {
 	{ EOWNERDEAD, EOWNERDEAD_BIONIC, "Owner died" },
 };
 
-int * __errno_soloader(void) {
-	int e = errno;
+/*
+ * errno for the game's code: a bionic value in a slot of the calling
+ * thread. It used to be a pointer into the translation table above, shared
+ * by every thread: the game writes errno too (errno = 0 before a call,
+ * saving and restoring it in signal handlers), and that overwrote the
+ * table. A newlib ETIMEDOUT then came back as whatever was written there,
+ * and IL2CPP aborted on a semaphore wait that had only timed out
+ * ("Abort called from" I+3ffeb0, sem_timedwait). A value the game wrote
+ * into its slot is handed to newlib's errno on the next call.
+ */
+#include <psp2/kernel/threadmgr.h>
 
+#define ERRNO_SLOTS 256
+static struct {
+	volatile int tid;
+	int value, given;
+} errno_slots[ERRNO_SLOTS];
+
+static int to_bionic(int e) {
 	for (int i = 0; i < sizeof(errno_translation) / sizeof(errno_translation[0]); ++i) {
 		if (e == errno_translation[i].errno_newlib)
-			return (int *) &errno_translation[i].errno_bionic;
+			return errno_translation[i].errno_bionic;
 	}
-
 	l_error("Unexpected newlib errno %i, will return 0 instead of translation", e);
-	return (int *) &errno_translation[0].errno_bionic;
+	return 0;
+}
+
+static int to_newlib(int b) {
+	for (int i = 0; i < sizeof(errno_translation) / sizeof(errno_translation[0]); ++i) {
+		if (b == errno_translation[i].errno_bionic)
+			return errno_translation[i].errno_newlib;
+	}
+	return b;
+}
+
+int * __errno_soloader(void) {
+	int tid = sceKernelGetThreadId();
+	unsigned h = ((unsigned)tid * 2654435761u) % ERRNO_SLOTS;
+	int i;
+	for (i = 0; i < ERRNO_SLOTS; i++) {
+		unsigned k = (h + i) % ERRNO_SLOTS;
+		int t = errno_slots[k].tid;
+		if (t == tid) {
+			h = k;
+			break;
+		}
+		if (t == 0 && __sync_bool_compare_and_swap(&errno_slots[k].tid, 0, tid)) {
+			errno_slots[k].value = errno_slots[k].given = to_bionic(errno);
+			h = k;
+			break;
+		}
+	}
+	if (i == ERRNO_SLOTS) {
+		static int spare; // more threads than slots: shared, as before
+		spare = to_bionic(errno);
+		return &spare;
+	}
+	if (errno_slots[h].value != errno_slots[h].given)
+		errno = to_newlib(errno_slots[h].value); // the game wrote errno
+	errno_slots[h].value = errno_slots[h].given = to_bionic(errno);
+	return &errno_slots[h].value;
 }
 
 char * strerror_soloader(int error_number) {
