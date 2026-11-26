@@ -279,6 +279,8 @@ static int shaders_seen = 0;
 static char *frag_source[MAX_SHADER_IDS];   // by shader id (debug builds)
 #define MAX_PROG_SRC 256
 static char *prog_frag_src[MAX_PROG_SRC];    // by program id: a copy (shader ids are reused)
+static char *vert_source[MAX_SHADER_IDS];   // vertex shaders, the same way
+static char *prog_vert_src[MAX_PROG_SRC];
 static uint8_t prog_src_logged[MAX_PROG_SRC];
 
 static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) {
@@ -345,6 +347,9 @@ static void glShaderSource_na(GLuint shader, GLsizei count, const GLchar *const 
     if (frag && shader < MAX_SHADER_IDS) {
         free(frag_source[shader]);
         frag_source[shader] = strdup(src);
+    } else if (!frag && shader < MAX_SHADER_IDS) {
+        free(vert_source[shader]);
+        vert_source[shader] = strdup(src);
     }
 #endif
     free(t);
@@ -2064,6 +2069,9 @@ static void glAttachShader_na(GLuint p, GLuint sh) {
         free(prog_frag_src[p]);
         prog_frag_src[p] = frag_source[sh] ? strdup(frag_source[sh]) : NULL;
         prog_src_logged[p] = 0;
+    } else if (p < MAX_PROG_SRC && sh < MAX_SHADER_IDS) {
+        free(prog_vert_src[p]);
+        prog_vert_src[p] = vert_source[sh] ? strdup(vert_source[sh]) : NULL;
     }
     glAttachShader(p, sh);
 }
@@ -2562,6 +2570,21 @@ static void prof_log_shader(GLuint prog) {
             lines++;
         }
         fs += n + (nl ? 1 : 0);
+    }
+    // and the body of the vertex shader (what it computes for the fragments)
+    const char *vs = prog_vert_src[prog];
+    int body = 0;
+    lines = 0;
+    while (vs && *vs && lines < 50) {
+        const char *nl = strchr(vs, '\n');
+        int n = nl ? (int)(nl - vs) : (int)strlen(vs);
+        if (!body && strncmp(vs, "uniform", 7) == 0) l_info("[PROF]   %u v| %.*s", prog, n > 200 ? 200 : n, vs);
+        if (strncmp(vs, "void main", 9) == 0) body = 1;
+        else if (body && n > 0) {
+            l_info("[PROF]   %u v| %.*s", prog, n > 200 ? 200 : n, vs);
+            lines++;
+        }
+        vs += n + (nl ? 1 : 0);
     }
 }
 

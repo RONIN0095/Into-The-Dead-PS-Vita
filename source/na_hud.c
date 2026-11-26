@@ -111,6 +111,7 @@ static void quality_tick(void) {
     static int (*get_tex)(void);
     static void (*set_tex)(int), (*set_aa)(int), (*set_aniso)(int), (*set_shadows)(int), (*set_soft)(int);
     static int (*get_skin)(void);
+    static int (*get_pixel_lights)(void), (*get_level)(void);
     static void (*set_skin)(int);
     static int looked = 0;
     if (!looked) {
@@ -128,6 +129,8 @@ static void quality_tick(void) {
         if (!get_skin) get_skin = resolve("UnityEngine.QualitySettings::get_blendWeights()");
         if (!set_skin) set_skin = resolve("UnityEngine.QualitySettings::set_blendWeights(UnityEngine.BlendWeights)");
         l_info("[HUD] skin weights icalls %p/%p", get_skin, set_skin);
+        get_pixel_lights = resolve("UnityEngine.QualitySettings::get_pixelLightCount()");
+        get_level = resolve("UnityEngine.QualitySettings::GetQualityLevel()");
         // Loading in the background as fast as it goes (High: the loading
         // thread runs at a high priority and the main thread integrates up
         // to 50 ms of loaded data a frame instead of 10)
@@ -154,6 +157,15 @@ static void quality_tick(void) {
      * on the CPU: no transform feedback in vitaGL) grew to ~36 ms a frame;
      * the zombies' weights beyond the second bone are small.
      */
+    {
+        // the game's quality level and pixel lights (lights beyond them are vertex lights)
+        static int last_level = -100, last_lights = -100;
+        int level = get_level ? get_level() : -1, lights = get_pixel_lights ? get_pixel_lights() : -1;
+        if (level != last_level || lights != last_lights) {
+            last_level = level, last_lights = lights;
+            l_info("[HUD] quality level %d, pixel lights %d", level, lights);
+        }
+    }
     if (get_skin && set_skin) {
         int w = get_skin();
         if (w > 2) {
